@@ -33,11 +33,13 @@ env/
 *.swo
 *~
 
-# Streamlit
-.streamlit/
+# Streamlit (but allow config)
+.streamlit/*
+!.streamlit/config.toml
 
-# Data files
+# Data files (but allow example data)
 *.csv
+!example_data.csv
 *.xlsx
 *.xls
 
