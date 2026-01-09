@@ -15,7 +15,7 @@ A production-ready web application for training and comparing multiple regressio
 
 ## 🚀 Quick Start
 
-### Option 1: Automated Setup (Recommended)
+### Automated Setup (Recommended)
 
 **Windows:**
 ```powershell
@@ -31,7 +31,7 @@ source .venv/bin/activate
 streamlit run app.py
 ```
 
-### Option 2: Manual Setup
+### Manual Setup
 
 ```bash
 # Create virtual environment
@@ -128,6 +128,15 @@ Models use optimized defaults from research:
 - **Random Forest**: n_estimators=500, min_samples_leaf=10
 - **Train/Val/Test Split**: 70/15/15
 - **Feature Scaling**: StandardScaler (fit on train only)
+
+## 📋 Usage
+
+1. **Upload CSV**: Click "Browse files" or drag-and-drop your CSV file
+2. **Select Target**: Choose the column you want to predict
+3. **Select Features**: Check the boxes for columns to use as predictors
+4. **Choose Models**: Select which models to train (all selected by default)
+5. **Train Models**: Click "Train Models" and watch the progress
+6. **View Results**: Compare models, see metrics, visualizations, and download predictions
 
 ## 🐛 Troubleshooting
 
