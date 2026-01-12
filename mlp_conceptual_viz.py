@@ -232,24 +232,30 @@ def create_conceptual_training_viz(
                 hoverinfo='skip'
             ))
     
-    # Add loss function info
+    # Add loss function info with explanation
     phase_text = "🔵 Forward Pass" if phase == "forward" else "🔴 Backpropagation"
     title = f"🧠 Neural Network Training - Epoch {epoch} | {phase_text}"
     
-    # Loss info box
-    loss_text = f"Loss ({loss_type}): {loss_value:.4f}"
+    # Loss info box with explanation
     if phase == "backward":
-        loss_text += f" | Error: {error:.4f}"
+        loss_text = f"<b>Loss ({loss_type}): {loss_value:.4f}</b><br>Error: {error:.4f}"
+        if loss_type == "Weighted Huber":
+            loss_text += "<br><i>Huber: robust to outliers | Weighted: focuses on high values</i>"
+    else:
+        loss_text = f"<b>Loss ({loss_type}): {loss_value:.4f}</b>"
+        if loss_type == "Weighted Huber":
+            loss_text += "<br><i>Combines Huber (outlier-resistant) with weighting</i>"
     
     fig.add_annotation(
         x=4,
         y=7.5,
         text=loss_text,
         showarrow=False,
-        font=dict(size=11, color='black', family='Arial'),
-        bgcolor='rgba(255, 255, 200, 0.9)',
+        font=dict(size=10, color='black', family='Arial'),
+        bgcolor='rgba(255, 255, 200, 0.95)',
         bordercolor='black',
-        borderwidth=2
+        borderwidth=2,
+        align='left'
     )
     
     # Layer labels
@@ -286,12 +292,33 @@ def create_conceptual_training_viz(
         borderwidth=2
     )
     
+    # Add Weighted Huber explanation box
+    if loss_type == "Weighted Huber":
+        explanation_y = 0.7
+        huber_explanation = (
+            "<b>Weighted Huber Loss Explained:</b><br>"
+            "• <b>Huber Loss:</b> Like MSE for small errors, like MAE for large errors<br>"
+            "• <b>Weighted:</b> Gives more importance to high target values<br>"
+            "• <b>Why:</b> More robust to outliers than MSE, focuses on important predictions"
+        )
+        fig.add_annotation(
+            x=4.5,
+            y=explanation_y,
+            text=huber_explanation,
+            showarrow=False,
+            font=dict(size=9, color='black', family='Arial'),
+            bgcolor='rgba(230, 240, 255, 0.95)',
+            bordercolor='blue',
+            borderwidth=2,
+            align='left'
+        )
+    
     fig.update_layout(
         title=dict(text=title, x=0.5, font=dict(size=14)),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 9]),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0.5, 8]),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 8]),
         plot_bgcolor='white',
-        height=450,
+        height=500,
         margin=dict(l=20, r=20, t=80, b=20)
     )
     

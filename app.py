@@ -271,10 +271,12 @@ if uploaded_file is not None:
                                             loss_value=train_loss,
                                             loss_type="Weighted Huber"
                                         )
-                                        viz_placeholder.plotly_chart(fig, use_container_width=True)
+                                        viz_placeholder.plotly_chart(fig, use_container_width=True, key=f"nn_viz_{epoch}")
                                     except Exception as e:
-                                        # If visualization fails, just skip it
-                                        logger.debug(f"Visualization error: {e}")
+                                        # Log error but don't break training
+                                        logger.warning(f"Visualization error: {e}")
+                                        # Show a simple message instead
+                                        viz_placeholder.info(f"🧠 Neural Network Training - Epoch {epoch} | {phase.title()}")
                                         pass
                             else:
                                 progress_bar.progress(1.0)
