@@ -28,6 +28,14 @@ try:
         plot_predictions_vs_actual,
         plot_residuals
     )
+    from mlp_visualization import (
+        extract_architecture,
+        calculate_node_positions,
+        create_network_graph,
+        create_animated_forward_pass,
+        create_animated_backward_pass,
+        simulate_forward_pass
+    )
 except ImportError as e:
     st.error(f"❌ Import error: {e}")
     st.error("Please ensure all dependencies are installed: `pip install -r requirements.txt`")
@@ -44,7 +52,7 @@ st.set_page_config(
 # Initialize session state
 def init_session_state():
     """Initialize session state variables."""
-    defaults = {
+        defaults = {
         'model': None,
         'scaler': None,
         'feature_names': None,
@@ -53,7 +61,10 @@ def init_session_state():
         'test_predictions': None,
         'test_actual': None,
         'model_type': None,
-        'all_results': {}  # Store results for all models
+        'all_results': {},  # Store results for all models
+        'animation_state': {},  # Store animation state
+        'X_test': None,
+        'y_test': None
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -190,6 +201,8 @@ if uploaded_file is not None:
                         
                         st.session_state.scaler = scaler
                         st.session_state.feature_names = feature_names
+                        st.session_state.X_test = X_test
+                        st.session_state.y_test = y_test
                         
                         st.success(f"✅ Data prepared: Train={len(X_train):,}, Val={len(X_val):,}, Test={len(X_test):,}")
                     except Exception as e:
@@ -308,6 +321,84 @@ if uploaded_file is not None:
                             st.subheader("Training History")
                             fig_history = plot_training_history(results['history'])
                             st.plotly_chart(fig_history, use_container_width=True)
+                            
+                            # MLP Architecture Visualization
+                            st.subheader("🧠 Neural Network Architecture Visualization")
+                            
+                            # Get model and architecture
+                            trainer = results['trainer']
+                            model = trainer.model
+                            feature_names = st.session_state.feature_names
+                            
+                            if model is not None:
+                                # Extract architecture
+                                architecture = extract_architecture(model, feature_names)
+                                node_positions, layer_info = calculate_node_positions(architecture)
+                                
+                                # Create static architecture view
+                                st.markdown("**Network Architecture:**")
+                                arch_text = " → ".join([str(size) for size in architecture['layer_sizes']])
+                                st.info(f"Architecture: {arch_text}")
+                                
+                                # Static network graph
+                                fig_static = create_network_graph(architecture, node_positions, layer_info)
+                                st.plotly_chart(fig_static, use_container_width=True)
+                                
+                                # Animation section
+                                st.markdown("**Animation Controls:**")
+                                
+                                # Get a sample input for animation
+                                if (st.session_state.scaler is not None and 
+                                    'X_test' in st.session_state and 
+                                    len(st.session_state.X_test) > 0):
+                                    sample_idx = 0
+                                    sample_input = st.session_state.X_test[sample_idx]
+                                    sample_target = st.session_state.y_test[sample_idx]
+                                    
+                                    # Get prediction
+                                    sample_pred = trainer.predict(sample_input.reshape(1, -1))[0]
+                                    
+                                    # Animation type selector
+                                    animation_type = st.radio(
+                                        "Select Animation Type:",
+                                        ["Forward Pass", "Backpropagation"],
+                                        key=f"anim_type_{model_type}",
+                                        horizontal=True
+                                    )
+                                    
+                                    if animation_type == "Forward Pass":
+                                        st.markdown("**Forward Pass Animation:** Shows how input data flows through the network layers.")
+                                        fig_forward = create_animated_forward_pass(
+                                            architecture, node_positions, layer_info,
+                                            sample_input, model, num_frames=30
+                                        )
+                                        st.plotly_chart(fig_forward, use_container_width=True)
+                                    else:
+                                        st.markdown("**Backpropagation Animation:** Shows how gradients flow backward through the network.")
+                                        # Get activations from forward pass
+                                        activations = simulate_forward_pass(architecture, sample_input, model)
+                                        
+                                        fig_backward = create_animated_backward_pass(
+                                            architecture, node_positions, layer_info,
+                                            activations, sample_target, sample_pred, num_frames=30
+                                        )
+                                        st.plotly_chart(fig_backward, use_container_width=True)
+                                    
+                                    # Show sample info
+                                    with st.expander("ℹ️ Animation Details"):
+                                        st.markdown(f"""
+                                        **Sample Input:**
+                                        - Features: {', '.join([f'{name}={val:.2f}' for name, val in zip(feature_names[:5], sample_input[:5])])}{'...' if len(feature_names) > 5 else ''}
+                                        - Target: {sample_target:.2f}
+                                        - Prediction: {sample_pred:.2f}
+                                        - Error: {sample_pred - sample_target:.2f}
+                                        
+                                        **Note:** This is a conceptual visualization. The animation shows how data flows 
+                                        through the network (forward pass) and how gradients flow back (backpropagation).
+                                        The actual training happens much faster! Use the Play/Pause buttons to control the animation.
+                                        """)
+                                else:
+                                    st.warning("⚠️ Test data not available for animation. Please train a model first.")
                         
                         col1, col2 = st.columns(2)
                         
