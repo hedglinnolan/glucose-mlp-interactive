@@ -67,7 +67,7 @@ def plot_predictions_vs_actual(y_true: np.ndarray, y_pred: np.ndarray,
         name='Predictions'
     ))
     
-    # Perfect prediction line
+    # y = x reference line (perfect agreement)
     min_val = min(y_true.min(), y_pred.min())
     max_val = max(y_true.max(), y_pred.max())
     fig.add_trace(go.Scatter(
@@ -75,7 +75,7 @@ def plot_predictions_vs_actual(y_true: np.ndarray, y_pred: np.ndarray,
         y=[min_val, max_val],
         mode='lines',
         line=dict(color='red', dash='dash'),
-        name='Perfect Prediction'
+        name='y = x reference (perfect agreement)'
     ))
     
     fig.update_layout(

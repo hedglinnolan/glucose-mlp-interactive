@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Dict, Optional
 import io
 import zipfile
+import plotly.graph_objects as go
+import plotly.express as px
 
 from utils.session_state import (
     init_session_state, get_data, get_preprocessing_pipeline,
@@ -74,6 +76,13 @@ def generate_report() -> str:
     report_lines.append(f"- **Validation:** {split_config.val_size*100:.1f}%")
     report_lines.append(f"- **Test:** {split_config.test_size*100:.1f}%")
     report_lines.append(f"- **Random State:** {split_config.random_state}")
+    report_lines.append(f"- **Global Random Seed:** {st.session_state.get('random_seed', 42)}")
+    if split_config.use_time_split:
+        report_lines.append(f"- **Split Type:** Time-based (using {split_config.datetime_col})")
+    else:
+        report_lines.append(f"- **Split Type:** Random")
+    if split_config.stratify:
+        report_lines.append(f"- **Stratification:** Enabled (for classification)")
     report_lines.append("")
     
     # Preprocessing Recipe
@@ -124,7 +133,18 @@ def generate_report() -> str:
         comparison_data.append(row)
     
     comparison_df = pd.DataFrame(comparison_data)
-    report_lines.append(comparison_df.to_markdown(index=False))
+    # Generate markdown table (with fallback if tabulate missing)
+    try:
+        report_lines.append(comparison_df.to_markdown(index=False))
+    except ImportError:
+        # Fallback: create markdown table manually
+        headers = '| ' + ' | '.join(comparison_df.columns) + ' |'
+        separators = '| ' + ' | '.join(['---'] * len(comparison_df.columns)) + ' |'
+        report_lines.append(headers)
+        report_lines.append(separators)
+        for _, row in comparison_df.iterrows():
+            values = '| ' + ' | '.join([str(v) for v in row.values]) + ' |'
+            report_lines.append(values)
     report_lines.append("")
     
     # Best Model
@@ -158,7 +178,18 @@ def generate_report() -> str:
                 'Feature': perm_data['feature_names'],
                 'Importance': perm_data['importances_mean']
             }).sort_values('Importance', ascending=False)
-            report_lines.append(importance_df.head(10).to_markdown(index=False))
+            # Generate markdown table (with fallback if tabulate missing)
+            try:
+                report_lines.append(importance_df.head(10).to_markdown(index=False))
+            except ImportError:
+                # Fallback: create markdown table manually
+                headers = '| ' + ' | '.join(importance_df.head(10).columns) + ' |'
+                separators = '| ' + ' | '.join(['---'] * len(importance_df.head(10).columns)) + ' |'
+                report_lines.append(headers)
+                report_lines.append(separators)
+                for _, row in importance_df.head(10).iterrows():
+                    values = '| ' + ' | '.join([str(v) for v in row.values]) + ' |'
+                    report_lines.append(values)
             report_lines.append("")
     
     # Notes
@@ -176,6 +207,18 @@ st.header("📋 Generated Report")
 st.markdown(report_text)
 
 # Download buttons
+# Helper function to save plotly figures as images
+def save_plotly_fig(fig, filename: str) -> Optional[bytes]:
+    """Save plotly figure as PNG bytes."""
+    try:
+        return fig.to_image(format="png", width=1200, height=800)
+    except Exception:
+        # Fallback: try with kaleido
+        try:
+            return fig.to_image(format="png", width=1200, height=800, engine="kaleido")
+        except Exception:
+            return None
+
 st.header("💾 Download")
 
 col1, col2 = st.columns(2)
@@ -210,6 +253,64 @@ with col2:
                 'Predicted': results['y_test_pred']
             })
             zip_file.writestr(f"predictions_{name}.csv", pred_df.to_csv(index=False))
+            
+            # Save prediction plot
+            if data_config.task_type == 'regression':
+                fig = px.scatter(
+                    x=results['y_test'], y=results['y_test_pred'],
+                    labels={'x': 'Actual', 'y': 'Predicted'},
+                    title=f"{name.upper()} - Predictions vs Actual"
+                )
+                fig.add_trace(go.Scatter(
+                    x=[min(results['y_test']), max(results['y_test'])],
+                    y=[min(results['y_test']), max(results['y_test'])],
+                    mode='lines',
+                    name='Perfect Prediction',
+                    line=dict(dash='dash', color='red')
+                ))
+                plot_bytes = save_plotly_fig(fig, f"plot_{name}_predictions.png")
+                if plot_bytes:
+                    zip_file.writestr(f"plot_{name}_predictions.png", plot_bytes)
+        
+        # Add learning curves if available
+        for name, model_wrapper in trained_models.items():
+            if name == 'nn' and hasattr(model_wrapper, 'get_training_history'):
+                try:
+                    history = model_wrapper.get_training_history()
+                    if history and 'train_loss' in history:
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(y=history['train_loss'], name='Train Loss', mode='lines'))
+                        if 'val_loss' in history:
+                            fig.add_trace(go.Scatter(y=history['val_loss'], name='Val Loss', mode='lines'))
+                        fig.update_layout(title=f"{name.upper()} - Learning Curves", xaxis_title="Epoch", yaxis_title="Loss")
+                        plot_bytes = save_plotly_fig(fig, f"plot_{name}_learning_curves.png")
+                        if plot_bytes:
+                            zip_file.writestr(f"plot_{name}_learning_curves.png", plot_bytes)
+                except Exception:
+                    pass
+        
+        # Add feature importance if available
+        perm_importance = st.session_state.get('permutation_importance', {})
+        for name, perm_data in perm_importance.items():
+            try:
+                importance_df = pd.DataFrame({
+                    'Feature': perm_data['feature_names'],
+                    'Importance': perm_data['importances_mean']
+                }).sort_values('Importance', ascending=False).head(10)
+                
+                fig = px.bar(
+                    importance_df,
+                    x='Importance',
+                    y='Feature',
+                    orientation='h',
+                    title=f"{name.upper()} - Feature Importance"
+                )
+                fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+                plot_bytes = save_plotly_fig(fig, f"plot_{name}_importance.png")
+                if plot_bytes:
+                    zip_file.writestr(f"plot_{name}_importance.png", plot_bytes)
+            except Exception:
+                pass
     
     st.download_button(
         label="📦 Download Complete Package (ZIP)",

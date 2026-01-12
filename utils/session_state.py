@@ -28,6 +28,7 @@ class SplitConfig:
     random_state: int = 42
     stratify: bool = False  # For classification
     use_time_split: bool = False  # Use datetime_col for splitting
+    datetime_col: Optional[str] = None  # Column to use for time-based splitting
 
 
 @dataclass
@@ -75,8 +76,9 @@ def init_session_state():
         
         # Models
         'model_config': ModelConfig(),
-        'trained_models': {},  # Dict[str, Any] - model name -> model object
+        'trained_models': {},  # Dict[str, Any] - model name -> model wrapper object
         'model_results': {},  # Dict[str, Dict] - model name -> metrics/history
+        'fitted_estimators': {},  # Dict[str, Any] - model name -> fitted sklearn-compatible estimator/pipeline
         
         # Evaluation
         'cv_results': None,  # For k-fold CV
@@ -89,6 +91,10 @@ def init_session_state():
         
         # Report
         'report_data': None,
+        
+        # Global settings
+        'random_seed': 42,  # Global random seed
+        'data_source': None,  # Track data source (uploaded CSV, built-in dataset, etc.)
     }
     
     for key, value in defaults.items():

@@ -80,8 +80,9 @@ def build_preprocessing_pipeline(
         
         # Encoding
         if categorical_encoding == 'onehot':
+            # Use sparse_output=True for memory efficiency, convert only when needed
             categorical_steps.append(('encoder', OneHotEncoder(
-                sparse_output=False,
+                sparse_output=True,  # Sparse for memory efficiency
                 handle_unknown=handle_unknown,
                 drop='if_binary'  # Drop one column for binary features
             )))
@@ -147,8 +148,53 @@ def get_pipeline_recipe(pipeline: Pipeline) -> str:
                         step_parts.append(f"Impute ({strategy})")
                     elif step_name == 'encoder':
                         if isinstance(step_transformer, OneHotEncoder):
-                            step_parts.append("One-hot encoding")
+                            step_parts.append("One-hot encoding (sparse)")
                 step_desc += " → ".join(step_parts) if step_parts else "No transformation"
                 steps.append(step_desc)
     
     return "\n".join(steps) if steps else "No preprocessing steps"
+
+
+def get_feature_names_after_transform(pipeline: Pipeline, original_feature_names: List[str]) -> List[str]:
+    """
+    Get feature names after pipeline transformation.
+    Handles sparse matrices and OneHotEncoder properly.
+    
+    Args:
+        pipeline: Fitted sklearn Pipeline
+        original_feature_names: Original feature names before transformation
+        
+    Returns:
+        List of feature names after transformation
+    """
+    try:
+        preprocessor = pipeline.named_steps['preprocessor']
+        if hasattr(preprocessor, 'get_feature_names_out'):
+            return list(preprocessor.get_feature_names_out())
+    except Exception:
+        pass
+    
+    # Fallback: construct names manually
+    feature_names = []
+    
+    if hasattr(pipeline.named_steps['preprocessor'], 'transformers_'):
+        for name, transformer, columns in pipeline.named_steps['preprocessor'].transformers_:
+            if name == 'numeric':
+                # Numeric features keep their names (unless scaled, but we keep original)
+                feature_names.extend(columns)
+            elif name == 'categorical':
+                # Categorical: one-hot encoding creates multiple columns
+                categorical_pipe = transformer
+                for step_name, step_transformer in categorical_pipe.steps:
+                    if step_name == 'encoder' and isinstance(step_transformer, OneHotEncoder):
+                        # Get categories for each original column
+                        if hasattr(step_transformer, 'categories_'):
+                            for col_idx, col_name in enumerate(columns):
+                                categories = step_transformer.categories_[col_idx]
+                                for cat in categories:
+                                    feature_names.append(f"{col_name}_{cat}")
+                        else:
+                            # Fallback: use column names
+                            feature_names.extend([f"{col}_encoded" for col in columns])
+    
+    return feature_names if feature_names else [f"feature_{i}" for i in range(pipeline.transform([[0]*len(original_feature_names)]).shape[1])]

@@ -1,5 +1,5 @@
 """
-Neural Network wrapper using weighted Huber loss.
+Neural Network wrapper using weighted Huber loss (regression) or BCE/CE loss (classification).
 Wraps the existing NN training implementation.
 """
 import torch
@@ -7,6 +7,8 @@ import torch.nn as nn
 import numpy as np
 from typing import Dict, List, Optional, Any
 import logging
+from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
+from sklearn.exceptions import NotFittedError
 
 from models.base import BaseModelWrapper
 
@@ -19,9 +21,18 @@ import torch.nn as nn
 
 
 class SimpleMLP(nn.Module):
-    """Simplified MLP for regression (from existing models.py)."""
+    """Simplified MLP for regression and classification."""
     
-    def __init__(self, input_dim: int, hidden: list = [32, 32], dropout: float = 0.1):
+    def __init__(self, input_dim: int, hidden: list = [32, 32], dropout: float = 0.1, output_dim: int = 1):
+        """
+        Initialize MLP.
+        
+        Args:
+            input_dim: Input feature dimension
+            hidden: List of hidden layer sizes
+            dropout: Dropout rate
+            output_dim: Output dimension (1 for regression/binary, n_classes for multiclass)
+        """
         super().__init__()
         layers = []
         prev_dim = input_dim
@@ -32,8 +43,9 @@ class SimpleMLP(nn.Module):
             layers.append(nn.Dropout(dropout))
             prev_dim = h
         
-        layers.append(nn.Linear(prev_dim, 1))
+        layers.append(nn.Linear(prev_dim, output_dim))
         self.layers = nn.Sequential(*layers)
+        self.output_dim = output_dim
     
     def forward(self, x):
         return self.layers(x)
@@ -60,22 +72,161 @@ def weighted_huber_loss(y_pred: torch.Tensor, y_true: torch.Tensor,
     return (w * huber_loss).mean()
 
 
-class NNWeightedHuberWrapper(BaseModelWrapper):
-    """Wrapper for Neural Network with weighted Huber loss."""
+class SklearnCompatibleNNRegressor(BaseEstimator, RegressorMixin):
+    """Sklearn-compatible wrapper for PyTorch NN model (regression)."""
     
-    def __init__(self, hidden_layers: List[int] = None, dropout: float = 0.1):
+    def __init__(self, wrapper_instance=None):
+        """
+        Initialize with NN wrapper instance.
+        
+        Args:
+            wrapper_instance: NNWeightedHuberWrapper instance (can be None initially)
+        """
+        self.wrapper_instance = wrapper_instance
+        self.task_type = 'regression'
+        self.is_fitted_ = False
+        self.n_features_in_ = None
+    
+    def _check_is_fitted(self):
+        """Check if estimator is fitted."""
+        if not self.is_fitted_:
+            raise NotFittedError(
+                f"This {self.__class__.__name__} instance is not fitted yet. "
+                "Call 'fit' with appropriate arguments before using this estimator."
+            )
+    
+    def fit(self, X, y):
+        """
+        Fit the model (sklearn interface).
+        
+        Note: The actual training is done by wrapper_instance.fit() before this is called.
+        This method just marks the estimator as fitted and sets required attributes.
+        """
+        if self.wrapper_instance is None:
+            raise ValueError("wrapper_instance must be set before calling fit()")
+        
+        # Mark as fitted
+        self.is_fitted_ = True
+        self.n_features_in_ = X.shape[1]
+        return self
+    
+    def predict(self, X):
+        """Predict (sklearn interface)."""
+        self._check_is_fitted()
+        if self.wrapper_instance is None:
+            raise ValueError("wrapper_instance must be set")
+        return self.wrapper_instance.predict(X)
+    
+    def get_params(self, deep=True):
+        """Get parameters (sklearn interface)."""
+        return {
+            'wrapper_instance': self.wrapper_instance
+        }
+    
+    def set_params(self, **params):
+        """Set parameters (sklearn interface)."""
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
+
+class SklearnCompatibleNNClassifier(BaseEstimator, ClassifierMixin):
+    """Sklearn-compatible wrapper for PyTorch NN model (classification)."""
+    
+    def __init__(self, wrapper_instance=None):
+        """
+        Initialize with NN wrapper instance.
+        
+        Args:
+            wrapper_instance: NNWeightedHuberWrapper instance (can be None initially)
+        """
+        self.wrapper_instance = wrapper_instance
+        self.task_type = 'classification'
+        self.is_fitted_ = False
+        self.n_features_in_ = None
+        self.classes_ = None
+    
+    def _check_is_fitted(self):
+        """Check if estimator is fitted."""
+        if not self.is_fitted_:
+            raise NotFittedError(
+                f"This {self.__class__.__name__} instance is not fitted yet. "
+                "Call 'fit' with appropriate arguments before using this estimator."
+            )
+    
+    def fit(self, X, y):
+        """
+        Fit the model (sklearn interface).
+        
+        Note: The actual training is done by wrapper_instance.fit() before this is called.
+        This method just marks the estimator as fitted and sets required attributes.
+        """
+        if self.wrapper_instance is None:
+            raise ValueError("wrapper_instance must be set before calling fit()")
+        
+        # Mark as fitted
+        self.is_fitted_ = True
+        self.n_features_in_ = X.shape[1]
+        self.classes_ = np.unique(y)
+        return self
+    
+    def predict(self, X):
+        """Predict (sklearn interface)."""
+        self._check_is_fitted()
+        if self.wrapper_instance is None:
+            raise ValueError("wrapper_instance must be set")
+        return self.wrapper_instance.predict(X)
+    
+    def predict_proba(self, X):
+        """Predict probabilities (classification only)."""
+        self._check_is_fitted()
+        if self.wrapper_instance is None:
+            raise ValueError("wrapper_instance must be set")
+        return self.wrapper_instance.predict_proba(X)
+    
+    def get_params(self, deep=True):
+        """Get parameters (sklearn interface)."""
+        return {
+            'wrapper_instance': self.wrapper_instance
+        }
+    
+    def set_params(self, **params):
+        """Set parameters (sklearn interface)."""
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
+
+# Factory function to create appropriate sklearn-compatible wrapper
+def SklearnCompatibleNN(wrapper_instance=None, task_type='regression'):
+    """Factory function to create appropriate sklearn-compatible wrapper."""
+    if task_type == 'classification':
+        return SklearnCompatibleNNClassifier(wrapper_instance)
+    else:
+        return SklearnCompatibleNNRegressor(wrapper_instance)
+
+
+class NNWeightedHuberWrapper(BaseModelWrapper):
+    """Wrapper for Neural Network with weighted Huber loss (regression) or BCE/CE loss (classification)."""
+    
+    def __init__(self, hidden_layers: List[int] = None, dropout: float = 0.1, task_type: str = 'regression'):
         """
         Initialize NN wrapper.
         
         Args:
             hidden_layers: List of hidden layer sizes (default: [32, 32])
             dropout: Dropout rate
+            task_type: 'regression' or 'classification'
         """
-        super().__init__("Neural Network (Weighted Huber)")
+        super().__init__("Neural Network")
         self.hidden_layers = hidden_layers or [32, 32]
         self.dropout = dropout
+        self.task_type = task_type
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.history = None
+        self._sklearn_estimator = None  # Lazy initialization
+        self.classes_ = None  # For classification
+        self.n_classes_ = None  # For classification
     
     def fit(self, X_train: np.ndarray, y_train: np.ndarray,
             X_val: Optional[np.ndarray] = None,
@@ -86,6 +237,7 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
             weight_decay: float = 0.0002,
             patience: int = 30,
             progress_callback: Optional[callable] = None,
+            random_seed: Optional[int] = None,
             **kwargs) -> Dict[str, Any]:
         """
         Train the neural network.
@@ -100,28 +252,71 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
             lr: Learning rate
             weight_decay: Weight decay (L2 regularization)
             patience: Early stopping patience
-            progress_callback: Optional callback function(epoch, train_loss, val_loss, val_rmse)
+            progress_callback: Optional callback function(epoch, train_loss, val_loss, val_metric)
+            random_seed: Random seed for reproducibility
             **kwargs: Additional arguments (ignored)
             
         Returns:
             Dictionary with training history
         """
-        # Convert to tensors
-        X_train_t = torch.FloatTensor(X_train).to(self.device)
-        y_train_t = torch.FloatTensor(y_train.reshape(-1, 1)).to(self.device)
+        # Set random seed
+        if random_seed is not None:
+            torch.manual_seed(random_seed)
+            np.random.seed(random_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(random_seed)
         
-        if X_val is not None and y_val is not None:
-            X_val_t = torch.FloatTensor(X_val).to(self.device)
-            y_val_t = torch.FloatTensor(y_val.reshape(-1, 1)).to(self.device)
+        # Handle classification vs regression
+        if self.task_type == 'classification':
+            # Get unique classes
+            self.classes_ = np.unique(y_train)
+            self.n_classes_ = len(self.classes_)
+            
+            # Map classes to 0, 1, 2, ... for training
+            class_to_idx = {cls: idx for idx, cls in enumerate(self.classes_)}
+            y_train_mapped = np.array([class_to_idx[cls] for cls in y_train])
+            
+            # Determine output dimension: binary = 1 logit, multiclass = n_classes logits
+            output_dim = 1 if self.n_classes_ == 2 else self.n_classes_
+            
+            # Convert to tensors
+            X_train_t = torch.FloatTensor(X_train).to(self.device)
+            y_train_t = torch.LongTensor(y_train_mapped).to(self.device)
+            
+            if X_val is not None and y_val is not None:
+                y_val_mapped = np.array([class_to_idx.get(cls, 0) for cls in y_val])
+                X_val_t = torch.FloatTensor(X_val).to(self.device)
+                y_val_t = torch.LongTensor(y_val_mapped).to(self.device)
+            else:
+                X_val_t = None
+                y_val_t = None
+            
+            # Loss function
+            if self.n_classes_ == 2:
+                criterion = nn.BCEWithLogitsLoss()
+            else:
+                criterion = nn.CrossEntropyLoss()
         else:
-            X_val_t = None
-            y_val_t = None
+            # Regression
+            output_dim = 1
+            X_train_t = torch.FloatTensor(X_train).to(self.device)
+            y_train_t = torch.FloatTensor(y_train.reshape(-1, 1)).to(self.device)
+            
+            if X_val is not None and y_val is not None:
+                X_val_t = torch.FloatTensor(X_val).to(self.device)
+                y_val_t = torch.FloatTensor(y_val.reshape(-1, 1)).to(self.device)
+            else:
+                X_val_t = None
+                y_val_t = None
+            
+            criterion = None  # Use weighted_huber_loss for regression
         
         # Create model
         self.model = SimpleMLP(
             input_dim=X_train.shape[1],
             hidden=self.hidden_layers,
-            dropout=self.dropout
+            dropout=self.dropout,
+            output_dim=output_dim
         )
         self.model = self.model.to(self.device)
         
@@ -138,12 +333,13 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
             )
         
         # Training loop
-        best_val_rmse = float('inf')
+        best_val_metric = float('inf') if self.task_type == 'regression' else 0.0
         patience_counter = 0
         history = {
             'train_loss': [],
             'val_loss': [],
-            'val_rmse': []
+            'val_rmse': [] if self.task_type == 'regression' else [],
+            'val_accuracy': [] if self.task_type == 'classification' else []
         }
         
         train_loader = torch.utils.data.DataLoader(
@@ -159,7 +355,18 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
             for X_batch, y_batch in train_loader:
                 optimizer.zero_grad()
                 y_pred = self.model(X_batch)
-                loss = weighted_huber_loss(y_pred, y_batch)
+                
+                if self.task_type == 'classification':
+                    if self.n_classes_ == 2:
+                        # Binary: squeeze to match target shape
+                        loss = criterion(y_pred.squeeze(), y_batch.float())
+                    else:
+                        # Multiclass
+                        loss = criterion(y_pred, y_batch)
+                else:
+                    # Regression
+                    loss = weighted_huber_loss(y_pred, y_batch)
+                
                 loss.backward()
                 optimizer.step()
                 train_losses.append(loss.item())
@@ -172,22 +379,49 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
                 self.model.eval()
                 with torch.no_grad():
                     y_val_pred = self.model(X_val_t)
-                    val_loss = weighted_huber_loss(y_val_pred, y_val_t)
-                    val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val_t) ** 2)).item()
+                    
+                    if self.task_type == 'classification':
+                        val_loss = criterion(y_val_pred.squeeze() if self.n_classes_ == 2 else y_val_pred, 
+                                            y_val_t.float() if self.n_classes_ == 2 else y_val_t)
+                        # Calculate accuracy
+                        if self.n_classes_ == 2:
+                            val_pred_labels = (torch.sigmoid(y_val_pred.squeeze()) > 0.5).long()
+                        else:
+                            val_pred_labels = torch.argmax(y_val_pred, dim=1)
+                        val_accuracy = (val_pred_labels == y_val_t).float().mean().item()
+                        val_metric = val_accuracy
+                    else:
+                        val_loss = weighted_huber_loss(y_val_pred, y_val_t)
+                        val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val_t) ** 2)).item()
+                        val_metric = val_rmse
                 
                 history['val_loss'].append(val_loss.item())
-                history['val_rmse'].append(val_rmse)
+                if self.task_type == 'regression':
+                    history['val_rmse'].append(val_rmse)
+                else:
+                    history['val_accuracy'].append(val_accuracy)
                 
                 # Progress callback
                 if progress_callback:
-                    progress_callback(epoch + 1, train_loss, val_loss.item(), val_rmse)
+                    if self.task_type == 'regression':
+                        progress_callback(epoch + 1, train_loss, val_loss.item(), val_rmse)
+                    else:
+                        progress_callback(epoch + 1, train_loss, val_loss.item(), val_accuracy)
                 
                 # Learning rate scheduling
-                scheduler.step(val_rmse)
+                if self.task_type == 'regression':
+                    scheduler.step(val_rmse)
+                else:
+                    scheduler.step(1.0 - val_accuracy)  # Step on negative accuracy (higher is better)
                 
                 # Early stopping
-                if val_rmse < best_val_rmse - 0.0001:
-                    best_val_rmse = val_rmse
+                if self.task_type == 'regression':
+                    is_better = val_rmse < best_val_metric - 0.0001
+                else:
+                    is_better = val_accuracy > best_val_metric + 0.0001
+                
+                if is_better:
+                    best_val_metric = val_metric
                     patience_counter = 0
                     best_model_state = self.model.state_dict().copy()
                 else:
@@ -209,8 +443,36 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
         
         return {
             'history': history,
-            'best_val_rmse': best_val_rmse if X_val_t is not None else None
+            'best_val_rmse': best_val_metric if self.task_type == 'regression' and X_val_t is not None else None,
+            'best_val_accuracy': best_val_metric if self.task_type == 'classification' and X_val_t is not None else None
         }
+    
+    def get_training_history(self) -> Optional[Dict[str, List[float]]]:
+        """Get training history (for plotting learning curves)."""
+        return self.history
+    
+    def get_sklearn_estimator(self):
+        """Get sklearn-compatible estimator wrapper."""
+        if self._sklearn_estimator is None:
+            self._sklearn_estimator = SklearnCompatibleNN(wrapper_instance=self, task_type=self.task_type)
+            # Mark as fitted and set attributes since model is already trained
+            # Note: fit() will be called later with actual data to set n_features_in_ and classes_ properly
+            self._sklearn_estimator.is_fitted_ = True
+            # Set n_features_in_ from model if available
+            if hasattr(self.model, 'layers') and len(self.model.layers) > 0:
+                if hasattr(self.model.layers[0], 'in_features'):
+                    self._sklearn_estimator.n_features_in_ = self.model.layers[0].in_features
+            # Set classes_ for classification
+            if self.task_type == 'classification' and self.classes_ is not None:
+                self._sklearn_estimator.classes_ = self.classes_
+        return self._sklearn_estimator
+    
+    def get_model(self) -> Any:
+        """Get the underlying model object (sklearn-compatible wrapper for explainability)."""
+        # Return sklearn-compatible wrapper for sklearn functions
+        if not self.is_fitted:
+            raise ValueError("Model not fitted. Call fit() first.")
+        return self.get_sklearn_estimator()
     
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Make predictions."""
@@ -220,7 +482,50 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
         self.model.eval()
         with torch.no_grad():
             X_t = torch.FloatTensor(X).to(self.device)
-            y_pred = self.model(X_t).cpu().numpy().flatten()
-        return y_pred
-
-
+            logits = self.model(X_t)
+            
+            if self.task_type == 'classification':
+                if self.n_classes_ == 2:
+                    # Binary: sigmoid + threshold
+                    probs = torch.sigmoid(logits.squeeze())
+                    pred_labels = (probs > 0.5).long().cpu().numpy()
+                else:
+                    # Multiclass: argmax
+                    pred_labels = torch.argmax(logits, dim=1).cpu().numpy()
+                
+                # Map back to original class labels
+                if self.classes_ is not None:
+                    pred_labels = self.classes_[pred_labels]
+                
+                return pred_labels
+            else:
+                # Regression
+                return logits.cpu().numpy().flatten()
+    
+    def predict_proba(self, X: np.ndarray) -> Optional[np.ndarray]:
+        """Predict class probabilities (for classification)."""
+        if not self.is_fitted:
+            raise ValueError("Model not fitted. Call fit() first.")
+        
+        if self.task_type != 'classification':
+            return None
+        
+        self.model.eval()
+        with torch.no_grad():
+            X_t = torch.FloatTensor(X).to(self.device)
+            logits = self.model(X_t)
+            
+            if self.n_classes_ == 2:
+                # Binary: sigmoid for positive class
+                prob_positive = torch.sigmoid(logits.squeeze()).cpu().numpy()
+                # Return shape (n_samples, 2)
+                probs = np.column_stack([1 - prob_positive, prob_positive])
+            else:
+                # Multiclass: softmax
+                probs = torch.softmax(logits, dim=1).cpu().numpy()
+            
+            return probs
+    
+    def supports_proba(self) -> bool:
+        """Check if model supports probability predictions."""
+        return self.task_type == 'classification'

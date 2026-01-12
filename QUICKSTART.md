@@ -1,102 +1,289 @@
-# Quick Start Guide
+# 🚀 Quick Start Guide
 
-## Installation
+## Prerequisites
 
-```bash
-# Navigate to the project directory
-cd glucose-mlp-interactive
+- Python 3.8 or higher
+- Git (for cloning)
+- 4GB RAM minimum
 
-# Create virtual environment
+## Windows (PowerShell)
+
+### From Fresh Clone
+
+```powershell
+# 1. Clone the repository (if not already cloned)
+# git clone <repo-url>
+# cd glucose-mlp-interactive
+
+# 2. Create virtual environment
 python -m venv .venv
 
-# Activate virtual environment
-# Windows:
+# 3. Activate virtual environment
 .\.venv\Scripts\Activate.ps1
-# macOS/Linux:
-source .venv/bin/activate
 
-# Install dependencies
+# 4. Install dependencies
 pip install -r requirements.txt
+
+# 5. Run preflight check (optional but recommended)
+python preflight.py
+
+# 6. Run the app
+.\run.ps1
 ```
 
-## Running the App
+**Or use the automated script:**
+```powershell
+# First time setup
+.\setup.ps1
+
+# Then run
+.\run.ps1
+```
+
+## macOS/Linux (bash/zsh)
+
+### From Fresh Clone
 
 ```bash
+# 1. Clone the repository (if not already cloned)
+# git clone <repo-url>
+# cd glucose-mlp-interactive
+
+# 2. Create virtual environment
+python3 -m venv .venv
+
+# 3. Activate virtual environment
+source .venv/bin/activate
+
+# 4. Install dependencies
+pip install -r requirements.txt
+
+# 5. Run preflight check (optional but recommended)
+python3 preflight.py
+
+# 6. Run the app
+./run.sh
+```
+
+**Or use the automated script:**
+```bash
+# Make scripts executable (first time)
+chmod +x setup.sh run.sh
+
+# First time setup
+./setup.sh
+
+# Then run
+./run.sh
+```
+
+## Branch Information
+
+**Current branch:** Check with `git branch --show-current`
+
+**To switch to feature branch (if needed):**
+```bash
+git checkout <branch-name>
+```
+
+## Preflight Check
+
+Run before starting the app to verify dependencies:
+
+```bash
+# Windows
+python preflight.py
+
+# macOS/Linux
+python3 preflight.py
+```
+
+This checks:
+- Python version (3.8+)
+- Key packages (streamlit, torch, pandas, numpy, sklearn, plotly)
+- Module imports (ml/*, models/*, utils/*)
+
+## Common Errors & Fixes
+
+### Error: "streamlit: command not found"
+**Fix:** Make sure virtual environment is activated
+```powershell
+# Windows
+.\.venv\Scripts\Activate.ps1
 streamlit run app.py
 ```
 
-The app will automatically open in your browser at `http://localhost:8501`
-
-## Usage Steps
-
-1. **Upload CSV File**
-   - Click "Browse files" in the sidebar or drag-and-drop your CSV
-   - The app will show a preview of your data
-
-2. **Select Target Variable**
-   - Choose the column you want to predict from the dropdown
-   - This should be a numeric column
-
-3. **Select Features**
-   - Check the boxes for columns to use as predictors
-   - You can select multiple features
-   - The target column is automatically excluded
-
-4. **Configure Training** (optional)
-   - Adjust epochs, batch size, and learning rate if needed
-   - Defaults are optimized for most datasets
-
-5. **Train Model**
-   - Click "Train Model" button
-   - Watch the training progress in real-time
-   - See validation RMSE update each epoch
-
-6. **View Results**
-   - See performance metrics (RMSE, MAE, R²)
-   - View training history plot
-   - See predictions vs actual scatter plot
-   - Check residual plot
-   - Download predictions as CSV
-
-## Example Dataset Format
-
-Your CSV should have:
-- Numeric columns for features
-- One numeric column for the target variable
-- No missing values (or they'll be filled with median)
-
-Example:
-```csv
-age,bmi,glucose,protein,carb
-25,22.5,95,50,200
-30,24.1,102,55,220
-...
+```bash
+# macOS/Linux
+source .venv/bin/activate
+streamlit run app.py
 ```
 
-## Troubleshooting
-
-**Import errors**: Make sure all dependencies are installed:
+### Error: "No module named 'torch'"
+**Fix:** Install PyTorch
 ```bash
+pip install torch
+# Or reinstall all requirements
 pip install -r requirements.txt
 ```
 
-**No numeric columns**: Ensure your CSV has numeric data columns
+### Error: "No module named 'sklearn'"
+**Fix:** Install scikit-learn
+```bash
+pip install scikit-learn
+# Or reinstall all requirements
+pip install -r requirements.txt
+```
 
-**Training errors**: Check that:
-- Target column is numeric
-- Feature columns are numeric
-- You have enough data (recommended: >100 rows)
+### Error: "numpy version incompatible"
+**Fix:** Upgrade numpy
+```bash
+pip install --upgrade numpy>=1.24.0
+```
 
-**Memory errors**: Reduce batch size or number of features
+### Error: "shap not found" (when using SHAP features)
+**Fix:** Install SHAP (optional)
+```bash
+pip install shap
+```
 
-## Model Architecture
+### Error: "Port 8501 already in use"
+**Fix:** Use a different port
+```bash
+streamlit run app.py --server.port 8502
+```
 
-The app uses a fixed, optimized architecture:
-- **Input**: Your selected features (automatically standardized)
-- **Hidden Layers**: [32, 32]
-- **Output**: Single value prediction
-- **Loss Function**: Weighted Huber (optimized for regression)
-- **Optimizer**: Adam with learning rate scheduling
-- **Regularization**: Dropout (0.1) and weight decay
+### Error: Import errors for ml/* or models/*
+**Fix:** Ensure you're in the repo root directory
+```bash
+# Verify you're in the right directory
+pwd  # Should show: .../glucose-mlp-interactive
 
-This architecture was found to work well across many regression tasks.
+# Check that directories exist
+ls ml/ models/ utils/
+```
+
+## 5-Minute Smoke Test Checklist
+
+### Test 1: Linear Regression with Outliers
+
+1. **Upload & Audit Page**
+   - Select "Linear Regression with Outliers" from dataset dropdown
+   - Click "Generate Dataset"
+   - **Expected:** Dataset preview shows 500 rows, 3 columns (feature_1, feature_2, target)
+   - Select "target" as target variable
+   - Select "feature_1" and "feature_2" as features
+   - **Expected:** Task type auto-detects as "Regression"
+
+2. **EDA Page**
+   - **Expected:** Summary statistics table, target distribution histogram, correlation heatmap
+   - **Expected:** Scatter plots showing target vs features
+
+3. **Preprocess Page**
+   - Click "Build Preprocessing Pipeline"
+   - **Expected:** Pipeline recipe displayed, transformation preview shows numeric features
+
+4. **Train & Compare Page**
+   - Click "Prepare Splits"
+   - Select: Neural Network, Random Forest, GLM (OLS), GLM (Huber)
+   - Click "Train Models"
+   - **Expected:** All models train successfully
+   - **Expected:** Metrics table shows all models
+   - **Expected:** Huber GLM should have competitive/better RMSE than OLS (due to outliers)
+
+5. **Explainability Page**
+   - Click "Calculate Permutation Importance"
+   - **Expected:** Feature importance bars for each model
+   - Click "Calculate Partial Dependence"
+   - **Expected:** Partial dependence plots for top 3 features
+
+6. **Report Export Page**
+   - **Expected:** Markdown report displayed
+   - Click "Download Complete Package (ZIP)"
+   - **Expected:** ZIP downloads with report.md, metrics.csv, predictions_*.csv, plot_*.png files
+
+### Test 2: Nonlinear Regression
+
+1. **Upload & Audit Page**
+   - Select "Nonlinear Regression" dataset
+   - Generate and configure (target + 3 features)
+   - **Expected:** Task type: Regression
+
+2. **Train & Compare Page**
+   - Train all models
+   - **Expected:** RF and NN should outperform GLM (lower RMSE) due to nonlinearity
+
+### Test 3: Imbalanced Classification
+
+1. **Upload & Audit Page**
+   - Select "Imbalanced Classification" dataset
+   - Generate and configure
+   - **Expected:** Task type auto-detects as "Classification" (10 unique values warning)
+   - Override to "Classification" if needed
+
+2. **EDA Page**
+   - **Expected:** Class balance chart shows ~80% class 0, ~20% class 1
+
+3. **Train & Compare Page**
+   - **Expected:** Neural Network and Huber GLM are disabled (classification not supported)
+   - Train: Random Forest, GLM (Logistic)
+   - **Expected:** Metrics include Accuracy, F1, ROC-AUC, LogLoss
+   - **Expected:** Confusion matrix displayed
+   - **Expected:** F1 and ROC-AUC more informative than accuracy (due to imbalance)
+
+4. **Explainability Page**
+   - Calculate importance and partial dependence
+   - **Expected:** Works correctly for classification models
+
+## Expected Page Behaviors
+
+### Upload & Audit Page
+- Dataset preview table
+- Data audit summary (missing values, duplicates, etc.)
+- Target/feature selection dropdowns
+- Task type selection (auto-detect with override)
+- Built-in dataset dropdown
+
+### EDA Page
+- Summary statistics table
+- Target distribution (histogram + box plot)
+- Correlation heatmap
+- Target vs feature plots (scatter for numeric, box for categorical)
+- Class balance (if classification)
+
+### Preprocess Page
+- Numeric preprocessing options (imputation, scaling, log transform)
+- Categorical preprocessing options (imputation, encoding)
+- Pipeline recipe display
+- Transformation preview (before/after)
+
+### Train & Compare Page
+- Split configuration sliders (train/val/test %)
+- Cross-validation toggle
+- Model selection checkboxes
+- Hyperparameter expanders
+- Training progress bars
+- Metrics comparison table
+- Learning curves (for NN)
+- Predictions vs Actual plots
+- Residual plots (regression) or Confusion matrix (classification)
+
+### Explainability Page
+- Permutation importance button
+- Feature importance bar charts
+- Partial dependence button
+- Partial dependence plots (top 3 features)
+- SHAP toggle (optional, requires shap package)
+
+### Report Export Page
+- Generated markdown report preview
+- Download buttons (Markdown, ZIP)
+- ZIP includes: report.md, metrics.csv, predictions_*.csv, plot_*.png
+
+## Time Estimate
+
+- **Setup:** 2-3 minutes (venv + dependencies)
+- **Preflight:** 10 seconds
+- **Smoke test:** 5 minutes (3 scenarios × ~1.5 min each)
+
+**Total:** ~8 minutes from clone to verified working app

@@ -101,6 +101,9 @@ if st.button("🔨 Build Preprocessing Pipeline", type="primary"):
             
             # Get transformed feature names
             X_transformed = pipeline.transform(X_sample)
+            # Convert sparse to dense if needed
+            if hasattr(X_transformed, 'toarray'):
+                X_transformed = X_transformed.toarray()
             if hasattr(X_transformed, 'shape'):
                 n_output_features = X_transformed.shape[1]
             else:
@@ -137,6 +140,9 @@ if st.button("🔨 Build Preprocessing Pipeline", type="primary"):
         
         with col2:
             st.subheader("After")
+            # Ensure dense array for DataFrame
+            if hasattr(X_transformed, 'toarray'):
+                X_transformed = X_transformed.toarray()
             X_transformed_df = pd.DataFrame(
                 X_transformed[:10],
                 columns=[f"feature_{i}" for i in range(n_output_features)]

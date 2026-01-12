@@ -15,6 +15,7 @@ from utils.session_state import (
     init_session_state, get_data, get_preprocessing_pipeline,
     DataConfig, SplitConfig, ModelConfig, set_splits, add_trained_model
 )
+from utils.seed import set_global_seed, get_global_seed
 from models.nn_whuber import NNWeightedHuberWrapper
 from models.glm import GLMWrapper
 from models.huber_glm import HuberGLMWrapper
@@ -49,8 +50,26 @@ logger = logging.getLogger(__name__)
 
 init_session_state()
 
+# Set global seed
+set_global_seed(st.session_state.get('random_seed', 42))
+
 st.set_page_config(page_title="Train & Compare", page_icon="🏋️", layout="wide")
 st.title("🏋️ Train & Compare Models")
+
+# Global random seed control
+with st.sidebar:
+    st.header("⚙️ Global Settings")
+    random_seed = st.number_input(
+        "Random Seed",
+        min_value=0,
+        max_value=9999,
+        value=st.session_state.get('random_seed', 42),
+        help="Controls randomness for reproducibility"
+    )
+    if random_seed != st.session_state.get('random_seed', 42):
+        st.session_state.random_seed = random_seed
+        set_global_seed(random_seed)
+        st.info("Seed updated. Re-run splits and training to apply.")
 
 # Check prerequisites
 df = get_data()
@@ -70,6 +89,18 @@ if pipeline is None:
 
 # Split configuration
 st.header("📊 Data Splitting")
+
+# Time-series split option
+use_time_split = False
+if data_config.datetime_col:
+    use_time_split = st.checkbox(
+        "Use Time-Based Split",
+        value=False,
+        help="Split data chronologically instead of randomly (recommended for time-series)"
+    )
+    if not use_time_split:
+        st.warning("⚠️ Datetime column detected but random split selected. Consider using time-based split for time-series data.")
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -87,7 +118,10 @@ split_config = SplitConfig(
     train_size=train_size,
     val_size=val_size,
     test_size=test_size,
-    stratify=(data_config.task_type == 'classification')
+    random_state=st.session_state.get('random_seed', 42),
+    stratify=(data_config.task_type == 'classification' and not use_time_split),
+    use_time_split=use_time_split,
+    datetime_col=data_config.datetime_col if use_time_split else None
 )
 st.session_state.split_config = split_config
 
@@ -106,11 +140,36 @@ if st.button("🔄 Prepare Splits", type="primary"):
         X = df[data_config.feature_cols]
         y = df[data_config.target_col]
         
-        # Apply preprocessing
+        # Apply preprocessing (convert sparse to dense if needed)
         X_transformed = pipeline.transform(X)
+        if hasattr(X_transformed, 'toarray'):
+            X_transformed = X_transformed.toarray()
         
-        # Split data
-        if split_config.stratify and data_config.task_type == 'classification':
+        # Split data (time-based or random)
+        if split_config.use_time_split and data_config.datetime_col:
+            # Time-based split
+            df_with_datetime = df.copy()
+            df_with_datetime['_temp_index'] = df_with_datetime.index
+            df_with_datetime = df_with_datetime.sort_values(data_config.datetime_col)
+            
+            # Calculate split indices
+            n_total = len(df_with_datetime)
+            n_train = int(n_total * train_size)
+            n_val = int(n_total * val_size)
+            
+            train_indices = df_with_datetime.iloc[:n_train]['_temp_index'].values
+            val_indices = df_with_datetime.iloc[n_train:n_train+n_val]['_temp_index'].values
+            test_indices = df_with_datetime.iloc[n_train+n_val:]['_temp_index'].values
+            
+            X_train = X_transformed[train_indices]
+            X_val = X_transformed[val_indices]
+            X_test = X_transformed[test_indices]
+            y_train = y.iloc[train_indices].values
+            y_val = y.iloc[val_indices].values
+            y_test = y.iloc[test_indices].values
+            
+            st.info(f"⏰ Time-based split: Train={df_with_datetime.iloc[0][data_config.datetime_col]} to {df_with_datetime.iloc[n_train-1][data_config.datetime_col]}")
+        elif split_config.stratify and data_config.task_type == 'classification':
             X_train, X_temp, y_train, y_temp = train_test_split(
                 X_transformed, y, test_size=(val_size + test_size),
                 random_state=split_config.random_state, stratify=y
@@ -131,11 +190,9 @@ if st.button("🔄 Prepare Splits", type="primary"):
                 random_state=split_config.random_state
             )
         
-        # Get feature names after transformation
-        if hasattr(pipeline.named_steps['preprocessor'], 'get_feature_names_out'):
-            feature_names = pipeline.named_steps['preprocessor'].get_feature_names_out()
-        else:
-            feature_names = [f"feature_{i}" for i in range(X_transformed.shape[1])]
+        # Get feature names after transformation (handle sparse matrices)
+        from ml.pipeline import get_feature_names_after_transform
+        feature_names = get_feature_names_after_transform(pipeline, data_config.feature_cols)
         
         set_splits(X_train, X_val, X_test, y_train.values, y_val.values, y_test.values, list(feature_names))
         st.success(f"✅ Splits prepared: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
@@ -166,34 +223,41 @@ col1, col2 = st.columns(2)
 with col1:
     train_nn = st.checkbox("Neural Network", value=True)
     if train_nn:
+        if data_config.task_type == 'classification':
+            st.info("ℹ️ Neural Network supports classification (BCE/CrossEntropy loss)")
         with st.expander("NN Hyperparameters"):
-            model_config.nn_epochs = st.number_input("Epochs", 50, 500, 200)
-            model_config.nn_batch_size = st.number_input("Batch Size", 32, 512, 256)
-            model_config.nn_lr = st.number_input("Learning Rate", 1e-5, 1e-2, 0.0015, format="%.4f")
-            model_config.nn_weight_decay = st.number_input("Weight Decay", 0.0, 1e-2, 0.0002, format="%.4f")
-            model_config.nn_patience = st.number_input("Early Stopping Patience", 5, 50, 30)
-            model_config.nn_dropout = st.number_input("Dropout", 0.0, 0.5, 0.1, format="%.2f")
+            model_config.nn_epochs = st.number_input("Epochs", 50, 500, 200, key="nn_epochs")
+            model_config.nn_batch_size = st.number_input("Batch Size", 32, 512, 256, key="nn_batch")
+            model_config.nn_lr = st.number_input("Learning Rate", 1e-5, 1e-2, 0.0015, format="%.4f", key="nn_lr")
+            model_config.nn_weight_decay = st.number_input("Weight Decay", 0.0, 1e-2, 0.0002, format="%.4f", key="nn_wd")
+            model_config.nn_patience = st.number_input("Early Stopping Patience", 5, 50, 30, key="nn_patience")
+            model_config.nn_dropout = st.number_input("Dropout", 0.0, 0.5, 0.1, format="%.2f", key="nn_dropout")
         models_to_train.append('nn')
 
     train_rf = st.checkbox("Random Forest", value=True)
     if train_rf:
         with st.expander("RF Hyperparameters"):
-            model_config.rf_n_estimators = st.number_input("N Estimators", 50, 1000, 500)
-            model_config.rf_max_depth = st.number_input("Max Depth", 1, 50, None, help="None = unlimited")
-            model_config.rf_min_samples_leaf = st.number_input("Min Samples Leaf", 1, 20, 10)
+            model_config.rf_n_estimators = st.number_input("N Estimators", 50, 1000, 500, key="rf_n_est")
+            model_config.rf_max_depth = st.number_input("Max Depth", 1, 50, None, help="None = unlimited", key="rf_depth")
+            model_config.rf_min_samples_leaf = st.number_input("Min Samples Leaf", 1, 20, 10, key="rf_leaf")
         models_to_train.append('rf')
 
 with col2:
-    train_glm = st.checkbox("GLM (OLS)", value=True)
+    train_glm = st.checkbox("GLM (OLS)" if data_config.task_type == 'regression' else "GLM (Logistic)", value=True)
     if train_glm:
         models_to_train.append('glm')
 
-    train_huber = st.checkbox("GLM (Huber)", value=True)
+    train_huber = st.checkbox("GLM (Huber)", value=(data_config.task_type == 'regression'))
     if train_huber:
-        with st.expander("Huber Hyperparameters"):
-            model_config.huber_epsilon = st.number_input("Epsilon", 1.0, 2.0, 1.35, format="%.2f")
-            model_config.huber_alpha = st.number_input("Alpha", 0.0, 1.0, 0.0, format="%.3f")
-        models_to_train.append('huber')
+        if data_config.task_type == 'classification':
+            st.warning("⚠️ Huber regression is for regression tasks only. Not suitable for classification.")
+            train_huber = False
+        else:
+            with st.expander("Huber Hyperparameters"):
+                model_config.huber_epsilon = st.number_input("Epsilon", 1.0, 2.0, 1.35, format="%.2f", key="huber_eps")
+                model_config.huber_alpha = st.number_input("Alpha", 0.0, 1.0, 0.0, format="%.3f", key="huber_alpha")
+            if train_huber:
+                models_to_train.append('huber')
 
 st.session_state.model_config = model_config
 
@@ -210,11 +274,17 @@ if st.button("🚀 Train Models", type="primary") and models_to_train:
             try:
                 # Create model wrapper
                 if model_name == 'nn':
-                    model = NNWeightedHuberWrapper(dropout=model_config.nn_dropout)
-                    def progress_cb(epoch, train_loss, val_loss, val_rmse):
+                    model = NNWeightedHuberWrapper(
+                        dropout=model_config.nn_dropout,
+                        task_type=data_config.task_type
+                    )
+                    def progress_cb(epoch, train_loss, val_loss, val_metric):
                         progress = epoch / model_config.nn_epochs
                         progress_bar.progress(progress)
-                        status_text.text(f"Epoch {epoch}/{model_config.nn_epochs} | Loss: {train_loss:.4f} | Val RMSE: {val_rmse:.4f}")
+                        if data_config.task_type == 'regression':
+                            status_text.text(f"Epoch {epoch}/{model_config.nn_epochs} | Loss: {train_loss:.4f} | Val RMSE: {val_metric:.4f}")
+                        else:
+                            status_text.text(f"Epoch {epoch}/{model_config.nn_epochs} | Loss: {train_loss:.4f} | Val Accuracy: {val_metric:.4f}")
                     
                     results = model.fit(
                         X_train, y_train, X_val, y_val,
@@ -223,7 +293,8 @@ if st.button("🚀 Train Models", type="primary") and models_to_train:
                         lr=model_config.nn_lr,
                         weight_decay=model_config.nn_weight_decay,
                         patience=model_config.nn_patience,
-                        progress_callback=progress_cb
+                        progress_callback=progress_cb,
+                        random_seed=st.session_state.get('random_seed', 42)
                     )
                 
                 elif model_name == 'rf':
@@ -236,7 +307,7 @@ if st.button("🚀 Train Models", type="primary") and models_to_train:
                     results = model.fit(X_train, y_train, X_val, y_val)
                 
                 elif model_name == 'glm':
-                    model = GLMWrapper()
+                    model = GLMWrapper(task_type=data_config.task_type)
                     results = model.fit(X_train, y_train, X_val, y_val)
                 
                 elif model_name == 'huber':
@@ -255,13 +326,19 @@ if st.button("🚀 Train Models", type="primary") and models_to_train:
                     y_test_proba = model.predict_proba(X_test) if model.supports_proba() else None
                     test_metrics = calculate_classification_metrics(y_test, y_test_pred, y_test_proba)
                 
-                # Cross-validation if enabled
+                # Cross-validation if enabled (skip for NN - PyTorch models don't implement sklearn interface)
                 cv_results = None
-                if use_cv:
-                    cv_results = perform_cross_validation(
-                        model.get_model(), X_train, y_train,
-                        cv_folds=cv_folds, task_type=data_config.task_type
-                    )
+                if use_cv and model_name != 'nn':
+                    try:
+                        cv_results = perform_cross_validation(
+                            model.get_model(), X_train, y_train,
+                            cv_folds=cv_folds, task_type=data_config.task_type
+                        )
+                    except Exception as cv_error:
+                        st.warning(f"⚠️ Cross-validation failed for {model_name}: {cv_error}. Skipping CV.")
+                        logger.warning(f"CV failed for {model_name}: {cv_error}")
+                elif use_cv and model_name == 'nn':
+                    st.info(f"ℹ️ Cross-validation skipped for Neural Network (PyTorch models use their own validation loop during training)")
                 
                 # Store results
                 model_results = {
@@ -273,6 +350,24 @@ if st.button("🚀 Train Models", type="primary") and models_to_train:
                 }
                 
                 add_trained_model(model_name, model, model_results)
+                
+                # Store fitted sklearn-compatible estimator for explainability
+                # For NN, store the sklearn-compatible wrapper
+                # For others, store the model itself (already sklearn-compatible)
+                if model_name == 'nn':
+                    fitted_estimator = model.get_sklearn_estimator()
+                    # Ensure it's marked as fitted with correct attributes
+                    # Use actual training data to set attributes properly
+                    if not hasattr(fitted_estimator, 'is_fitted_') or not fitted_estimator.is_fitted_:
+                        fitted_estimator.fit(X_train[:1], y_train[:1])
+                    st.session_state.fitted_estimators[model_name] = fitted_estimator
+                else:
+                    # For sklearn models, store the model directly
+                    # sklearn models are already fitted after model.fit() call above
+                    # They don't have is_fitted_ but sklearn's check_is_fitted will work
+                    sklearn_model = model.get_model()
+                    st.session_state.fitted_estimators[model_name] = sklearn_model
+                
                 progress_bar.progress(1.0)
                 st.success(f"✅ {model_name.upper()} training complete!")
                 
@@ -356,14 +451,23 @@ if st.session_state.get('trained_models'):
                 fig_history = plot_training_history(results['history'])
                 st.plotly_chart(fig_history, use_container_width=True)
             
-            # Predictions vs Actual
-            st.subheader("Predictions vs Actual")
-            fig_pred = plot_predictions_vs_actual(
-                results['y_test'],
-                results['y_test_pred'],
-                title=f"{name.upper()} Predictions"
-            )
-            st.plotly_chart(fig_pred, use_container_width=True)
+            # Predictions vs Actual (regression only)
+            if data_config.task_type == 'regression':
+                st.subheader("Predictions vs Actual")
+                fig_pred = plot_predictions_vs_actual(
+                    results['y_test'],
+                    results['y_test_pred'],
+                    title=f"{name.upper()} Predictions"
+                )
+                st.plotly_chart(fig_pred, use_container_width=True)
+                st.caption("The dashed red line (y = x) represents perfect agreement between predictions and actual values. Points closer to this line indicate better predictions.")
+            else:
+                # Classification: show ROC/PR or note
+                st.subheader("Classification Performance")
+                if model.supports_proba():
+                    st.info("ℹ️ For classification models, see the Confusion Matrix and metrics above. ROC/PR curves can be added in future updates.")
+                else:
+                    st.info("ℹ️ This model does not support probability predictions. See the Confusion Matrix above.")
             
             # Residuals (regression) or Confusion Matrix (classification)
             if data_config.task_type == 'regression':

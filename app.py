@@ -12,6 +12,41 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Learning Checklist Sidebar
+with st.sidebar:
+    st.header("📋 Learning Checklist")
+    
+    # Check completion status
+    data_uploaded = st.session_state.get('df') is not None
+    data_configured = st.session_state.get('data_config') is not None and st.session_state.get('data_config').target_col is not None
+    audit_complete = st.session_state.get('data_audit') is not None
+    pipeline_built = st.session_state.get('preprocessing_pipeline') is not None
+    models_trained = len(st.session_state.get('trained_models', {})) > 0
+    explainability_run = st.session_state.get('permutation_importance') is not None
+    report_generated = st.session_state.get('report_data') is not None
+    
+    checklist_items = [
+        ("📁 Upload Data", data_uploaded),
+        ("🔍 Review Audit", audit_complete),
+        ("📊 Explore EDA", data_configured),  # EDA can be viewed once data is configured
+        ("⚙️ Build Pipeline", pipeline_built),
+        ("🏋️ Train Models", models_trained),
+        ("🔍 Run Explainability", explainability_run),
+        ("📄 Export Report", report_generated)
+    ]
+    
+    for item, completed in checklist_items:
+        status = "✅" if completed else "⏳"
+        st.markdown(f"{status} {item}")
+    
+    st.divider()
+    
+    # Progress indicator
+    completed_count = sum(1 for _, completed in checklist_items if completed)
+    progress_pct = (completed_count / len(checklist_items)) * 100
+    st.progress(progress_pct / 100)
+    st.caption(f"Progress: {completed_count}/{len(checklist_items)} steps complete")
+
 # Main page (home)
 st.title("🧪 Modeling Lab")
 st.markdown("""
