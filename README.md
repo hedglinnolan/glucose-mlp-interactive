@@ -308,7 +308,6 @@ glucose-mlp-interactive/
 ## 📚 Additional Resources
 
 - [Development Workflow Guide](DEVELOPMENT.md)
-- [Multi-Page Guide](MULTIPAGE_GUIDE.md)
 - [Deployment Guide](DEPLOYMENT.md)
 
 ## 👤 Author

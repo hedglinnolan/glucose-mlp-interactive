@@ -22,15 +22,15 @@ def check_package(package_name, import_name=None):
     try:
         module = importlib.import_module(import_name)
         version = getattr(module, '__version__', 'unknown')
-        print(f"✓ {package_name}: {version}")
+        print(f"[OK] {package_name}: {version}")
         return True
     except ImportError:
-        print(f"✗ {package_name}: NOT INSTALLED")
+        print(f"[MISSING] {package_name}: NOT INSTALLED")
         return False
 
 def check_key_packages():
     """Check key packages."""
-    print("\n📦 Key Packages:")
+    print("\nKey Packages:")
     packages = [
         ('streamlit', 'streamlit'),
         ('torch', 'torch'),
@@ -47,22 +47,22 @@ def check_key_packages():
             all_ok = False
     
     # Optional packages
-    print("\n📦 Optional Packages:")
+    print("\nOptional Packages:")
     optional = [
         ('shap', 'shap'),
         ('kaleido', 'kaleido'),
     ]
     for pkg_name, import_name in optional:
         if check_package(pkg_name, import_name):
-            print(f"  (Optional) ✓ {pkg_name} installed")
+            print(f"  (Optional) [OK] {pkg_name} installed")
         else:
-            print(f"  (Optional) ⚠ {pkg_name} not installed (some features may be limited)")
+            print(f"  (Optional) [WARN] {pkg_name} not installed (some features may be limited)")
     
     return all_ok
 
 def check_module_imports():
     """Check that app modules can be imported."""
-    print("\n🔍 Module Imports:")
+    print("\nModule Imports:")
     
     modules_to_check = [
         ('ml.pipeline', 'ml/pipeline.py'),
@@ -81,12 +81,12 @@ def check_module_imports():
     for module_name, file_path in modules_to_check:
         try:
             importlib.import_module(module_name)
-            print(f"✓ {module_name}")
+            print(f"[OK] {module_name}")
         except ImportError as e:
-            print(f"✗ {module_name}: {str(e)}")
+            print(f"[ERROR] {module_name}: {str(e)}")
             all_ok = False
         except Exception as e:
-            print(f"⚠ {module_name}: {type(e).__name__} - {str(e)}")
+            print(f"[WARN] {module_name}: {type(e).__name__} - {str(e)}")
             # Some modules might have dependencies that fail, but module itself loads
     
     return all_ok
@@ -94,10 +94,10 @@ def check_module_imports():
 def main():
     """Run preflight checks."""
     print("=" * 60)
-    print("🧪 Modeling Lab - Preflight Check")
+    print("Modeling Lab - Preflight Check")
     print("=" * 60)
     
-    print("\n🐍 Python Environment:")
+    print("\nPython Environment:")
     py_ok = check_python_version()
     
     pkg_ok = check_key_packages()
@@ -105,13 +105,13 @@ def main():
     
     print("\n" + "=" * 60)
     if py_ok and pkg_ok and mod_ok:
-        print("✅ All checks passed! Ready to run the app.")
+        print("[OK] All checks passed! Ready to run the app.")
         print("\nNext steps:")
         print("  Windows:  .\\run.ps1")
         print("  macOS/Linux:  ./run.sh")
         return 0
     else:
-        print("❌ Some checks failed. Please install missing dependencies:")
+        print("[ERROR] Some checks failed. Please install missing dependencies:")
         print("  pip install -r requirements.txt")
         return 1
 
