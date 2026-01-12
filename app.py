@@ -52,7 +52,7 @@ st.set_page_config(
 # Initialize session state
 def init_session_state():
     """Initialize session state variables."""
-        defaults = {
+    defaults = {
         'model': None,
         'scaler': None,
         'feature_names': None,
