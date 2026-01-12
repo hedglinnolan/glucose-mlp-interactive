@@ -28,15 +28,6 @@ try:
         plot_predictions_vs_actual,
         plot_residuals
     )
-    from mlp_visualization import (
-        extract_architecture,
-        calculate_node_positions,
-        create_network_graph,
-        create_animated_forward_pass,
-        create_animated_backward_pass,
-        simulate_forward_pass
-    )
-    from mlp_conceptual_viz import create_conceptual_training_viz
 except ImportError as e:
     st.error(f"❌ Import error: {e}")
     st.error("Please ensure all dependencies are installed: `pip install -r requirements.txt`")
@@ -222,62 +213,12 @@ if uploaded_file is not None:
                         status_text = st.empty()
                         metrics_placeholder = st.empty()
                         
-                        # Setup lightweight visualization for neural network
-                        viz_placeholder = None
-                        sample_input = None
-                        sample_target = None
-                        
-                        if model_type == "neural_network":
-                            # Prepare visualization components
-                            viz_placeholder = st.empty()
-                            # Get a sample for visualization
-                            sample_idx = 0
-                            sample_input = X_train[sample_idx]
-                            sample_target = y_train[sample_idx]
-                        
                         # Progress callback
                         def update_progress(epoch, train_loss, val_loss, val_rmse, **kwargs):
-                            model = kwargs.get('model', None)
-                            
                             if model_type == "neural_network":
                                 progress = epoch / epochs
                                 progress_bar.progress(progress)
                                 status_text.text(f"Epoch {epoch}/{epochs} | Train Loss: {train_loss:.4f} | Val RMSE: {val_rmse:.4f}")
-                                
-                                # Update lightweight conceptual visualization during training
-                                if model is not None and viz_placeholder is not None and sample_input is not None:
-                                    # Alternate between forward and backward pass visualization
-                                    phase = "forward" if epoch % 2 == 1 else "backward"
-                                    
-                                    # Get current prediction and loss for visualization
-                                    try:
-                                        model.eval()
-                                        with torch.no_grad():
-                                            sample_tensor = torch.FloatTensor(sample_input).unsqueeze(0)
-                                            pred_tensor = model(sample_tensor)
-                                            current_pred = pred_tensor.item()
-                                        
-                                        # Create lightweight conceptual visualization
-                                        # Use target_col from outer scope
-                                        fig = create_conceptual_training_viz(
-                                            feature_names=feature_names,
-                                            target_name=target_col,  # From outer scope
-                                            sample_input=sample_input,
-                                            model=model,
-                                            epoch=epoch,
-                                            phase=phase,
-                                            target_value=sample_target,
-                                            prediction=current_pred,
-                                            loss_value=train_loss,
-                                            loss_type="Weighted Huber"
-                                        )
-                                        viz_placeholder.plotly_chart(fig, use_container_width=True, key=f"nn_viz_{epoch}")
-                                    except Exception as e:
-                                        # Log error but don't break training
-                                        logger.warning(f"Visualization error: {e}")
-                                        # Show a simple message instead
-                                        viz_placeholder.info(f"🧠 Neural Network Training - Epoch {epoch} | {phase.title()}")
-                                        pass
                             else:
                                 progress_bar.progress(1.0)
                                 status_text.text(f"Training {model_type.replace('_', ' ').title()}...")
@@ -372,84 +313,6 @@ if uploaded_file is not None:
                             st.subheader("Training History")
                             fig_history = plot_training_history(results['history'])
                             st.plotly_chart(fig_history, use_container_width=True)
-                            
-                            # MLP Architecture Visualization
-                            st.subheader("🧠 Neural Network Architecture Visualization")
-                            
-                            # Get model and architecture
-                            trainer = results['trainer']
-                            model = trainer.model
-                            feature_names = st.session_state.feature_names
-                            
-                            if model is not None:
-                                # Extract architecture
-                                architecture = extract_architecture(model, feature_names)
-                                node_positions, layer_info = calculate_node_positions(architecture)
-                                
-                                # Create static architecture view
-                                st.markdown("**Network Architecture:**")
-                                arch_text = " → ".join([str(size) for size in architecture['layer_sizes']])
-                                st.info(f"Architecture: {arch_text}")
-                                
-                                # Static network graph
-                                fig_static = create_network_graph(architecture, node_positions, layer_info)
-                                st.plotly_chart(fig_static, use_container_width=True)
-                                
-                                # Animation section
-                                st.markdown("**Animation Controls:**")
-                                
-                                # Get a sample input for animation
-                                if (st.session_state.scaler is not None and 
-                                    'X_test' in st.session_state and 
-                                    len(st.session_state.X_test) > 0):
-                                    sample_idx = 0
-                                    sample_input = st.session_state.X_test[sample_idx]
-                                    sample_target = st.session_state.y_test[sample_idx]
-                                    
-                                    # Get prediction
-                                    sample_pred = trainer.predict(sample_input.reshape(1, -1))[0]
-                                    
-                                    # Animation type selector
-                                    animation_type = st.radio(
-                                        "Select Animation Type:",
-                                        ["Forward Pass", "Backpropagation"],
-                                        key=f"anim_type_{model_type}",
-                                        horizontal=True
-                                    )
-                                    
-                                    if animation_type == "Forward Pass":
-                                        st.markdown("**Forward Pass Animation:** Shows how input data flows through the network layers.")
-                                        fig_forward = create_animated_forward_pass(
-                                            architecture, node_positions, layer_info,
-                                            sample_input, model, num_frames=30
-                                        )
-                                        st.plotly_chart(fig_forward, use_container_width=True)
-                                    else:
-                                        st.markdown("**Backpropagation Animation:** Shows how gradients flow backward through the network.")
-                                        # Get activations from forward pass
-                                        activations = simulate_forward_pass(architecture, sample_input, model)
-                                        
-                                        fig_backward = create_animated_backward_pass(
-                                            architecture, node_positions, layer_info,
-                                            activations, sample_target, sample_pred, num_frames=30
-                                        )
-                                        st.plotly_chart(fig_backward, use_container_width=True)
-                                    
-                                    # Show sample info
-                                    with st.expander("ℹ️ Animation Details"):
-                                        st.markdown(f"""
-                                        **Sample Input:**
-                                        - Features: {', '.join([f'{name}={val:.2f}' for name, val in zip(feature_names[:5], sample_input[:5])])}{'...' if len(feature_names) > 5 else ''}
-                                        - Target: {sample_target:.2f}
-                                        - Prediction: {sample_pred:.2f}
-                                        - Error: {sample_pred - sample_target:.2f}
-                                        
-                                        **Note:** This is a conceptual visualization. The animation shows how data flows 
-                                        through the network (forward pass) and how gradients flow back (backpropagation).
-                                        The actual training happens much faster! Use the Play/Pause buttons to control the animation.
-                                        """)
-                                else:
-                                    st.warning("⚠️ Test data not available for animation. Please train a model first.")
                         
                         col1, col2 = st.columns(2)
                         

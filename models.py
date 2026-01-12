@@ -176,8 +176,7 @@ class ModelTrainer:
             
             # Progress callback
             if progress_callback:
-                # Pass model for visualization
-                progress_callback(epoch + 1, train_loss, val_loss.item(), val_rmse, model=model)
+                progress_callback(epoch + 1, train_loss, val_loss.item(), val_rmse)
             
             # Learning rate scheduling
             scheduler.step(val_rmse)
