@@ -179,6 +179,24 @@ Test with sample data:
 3. Train all models
 4. Compare results
 
+## 👨‍💻 Development
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for a complete guide on:
+- Safe feature development workflow
+- Branching strategy
+- Best practices for testing changes
+- How to use feature branches
+
+**Quick start for new features:**
+```powershell
+# Windows
+.\create-feature-branch.ps1 -FeatureName "your-feature-name"
+
+# macOS/Linux
+chmod +x create-feature-branch.sh
+./create-feature-branch.sh your-feature-name
+```
+
 ## 📝 License
 
 MIT License
