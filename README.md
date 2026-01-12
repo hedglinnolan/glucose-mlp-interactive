@@ -19,16 +19,22 @@ A production-ready web application for training and comparing multiple regressio
 
 **Windows:**
 ```powershell
+# First time setup
 .\setup.ps1
-streamlit run app.py
+
+# Run the app (automatically activates virtual environment)
+.\run.ps1
 ```
 
 **macOS/Linux:**
 ```bash
+# First time setup
 chmod +x setup.sh
 ./setup.sh
-source .venv/bin/activate
-streamlit run app.py
+
+# Run the app (automatically activates virtual environment)
+chmod +x run.sh
+./run.sh
 ```
 
 ### Manual Setup
@@ -49,6 +55,8 @@ pip install -r requirements.txt
 # Run the app
 streamlit run app.py
 ```
+
+**Note:** If you get "streamlit: command not found", make sure you've activated the virtual environment first! The `run.ps1` (Windows) or `run.sh` (macOS/Linux) scripts do this automatically.
 
 The app will open in your browser at `http://localhost:8501`
 
