@@ -204,7 +204,3 @@ MIT License
 ## 👤 Author
 
 Nolan Hedglin (D/Math)
-
-## 🙏 Acknowledgments
-
-Based on research comparing neural networks vs traditional ML methods for regression tasks.
