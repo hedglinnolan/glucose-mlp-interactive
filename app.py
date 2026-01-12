@@ -32,11 +32,11 @@ try:
         extract_architecture,
         calculate_node_positions,
         create_network_graph,
-        create_training_visualization,
         create_animated_forward_pass,
         create_animated_backward_pass,
         simulate_forward_pass
     )
+    from mlp_conceptual_viz import create_conceptual_training_viz
 except ImportError as e:
     st.error(f"❌ Import error: {e}")
     st.error("Please ensure all dependencies are installed: `pip install -r requirements.txt`")
@@ -222,9 +222,8 @@ if uploaded_file is not None:
                         status_text = st.empty()
                         metrics_placeholder = st.empty()
                         
-                        # Setup visualization for neural network
+                        # Setup lightweight visualization for neural network
                         viz_placeholder = None
-                        viz_state = {'architecture': None, 'node_positions': None, 'layer_info': None}
                         sample_input = None
                         sample_target = None
                         
@@ -245,17 +244,12 @@ if uploaded_file is not None:
                                 progress_bar.progress(progress)
                                 status_text.text(f"Epoch {epoch}/{epochs} | Train Loss: {train_loss:.4f} | Val RMSE: {val_rmse:.4f}")
                                 
-                                # Update visualization during training
+                                # Update lightweight conceptual visualization during training
                                 if model is not None and viz_placeholder is not None and sample_input is not None:
-                                    # Extract architecture on first epoch
-                                    if viz_state['architecture'] is None:
-                                        viz_state['architecture'] = extract_architecture(model, feature_names)
-                                        viz_state['node_positions'], viz_state['layer_info'] = calculate_node_positions(viz_state['architecture'])
-                                    
                                     # Alternate between forward and backward pass visualization
                                     phase = "forward" if epoch % 2 == 1 else "backward"
                                     
-                                    # Get current prediction for visualization
+                                    # Get current prediction and loss for visualization
                                     try:
                                         model.eval()
                                         with torch.no_grad():
@@ -263,15 +257,24 @@ if uploaded_file is not None:
                                             pred_tensor = model(sample_tensor)
                                             current_pred = pred_tensor.item()
                                         
-                                        # Create visualization
-                                        fig = create_training_visualization(
-                                            viz_state['architecture'], viz_state['node_positions'], viz_state['layer_info'],
-                                            sample_input, model, epoch, phase,
-                                            target=sample_target, prediction=current_pred
+                                        # Create lightweight conceptual visualization
+                                        # Use target_col from outer scope
+                                        fig = create_conceptual_training_viz(
+                                            feature_names=feature_names,
+                                            target_name=target_col,  # From outer scope
+                                            sample_input=sample_input,
+                                            model=model,
+                                            epoch=epoch,
+                                            phase=phase,
+                                            target_value=sample_target,
+                                            prediction=current_pred,
+                                            loss_value=train_loss,
+                                            loss_type="Weighted Huber"
                                         )
                                         viz_placeholder.plotly_chart(fig, use_container_width=True)
-                                    except Exception:
+                                    except Exception as e:
                                         # If visualization fails, just skip it
+                                        logger.debug(f"Visualization error: {e}")
                                         pass
                             else:
                                 progress_bar.progress(1.0)
