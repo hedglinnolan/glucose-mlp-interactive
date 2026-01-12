@@ -236,15 +236,15 @@ def create_conceptual_training_viz(
     phase_text = "🔵 Forward Pass" if phase == "forward" else "🔴 Backpropagation"
     title = f"🧠 Neural Network Training - Epoch {epoch} | {phase_text}"
     
-    # Loss info box with explanation
+    # Loss info box with explanation (use plain text, not HTML)
     if phase == "backward":
-        loss_text = f"<b>Loss ({loss_type}): {loss_value:.4f}</b><br>Error: {error:.4f}"
+        loss_text = f"Loss ({loss_type}): {loss_value:.4f}\nError: {error:.4f}"
         if loss_type == "Weighted Huber":
-            loss_text += "<br><i>Huber: robust to outliers | Weighted: focuses on high values</i>"
+            loss_text += "\nHuber: robust to outliers | Weighted: focuses on high values"
     else:
-        loss_text = f"<b>Loss ({loss_type}): {loss_value:.4f}</b>"
+        loss_text = f"Loss ({loss_type}): {loss_value:.4f}"
         if loss_type == "Weighted Huber":
-            loss_text += "<br><i>Combines Huber (outlier-resistant) with weighting</i>"
+            loss_text += "\nCombines Huber (outlier-resistant) with weighting"
     
     fig.add_annotation(
         x=4,
@@ -292,14 +292,14 @@ def create_conceptual_training_viz(
         borderwidth=2
     )
     
-    # Add Weighted Huber explanation box
+    # Add Weighted Huber explanation box (use plain text)
     if loss_type == "Weighted Huber":
         explanation_y = 0.7
         huber_explanation = (
-            "<b>Weighted Huber Loss Explained:</b><br>"
-            "• <b>Huber Loss:</b> Like MSE for small errors, like MAE for large errors<br>"
-            "• <b>Weighted:</b> Gives more importance to high target values<br>"
-            "• <b>Why:</b> More robust to outliers than MSE, focuses on important predictions"
+            "Weighted Huber Loss Explained:\n"
+            "• Huber Loss: Like MSE for small errors, like MAE for large errors\n"
+            "• Weighted: Gives more importance to high target values\n"
+            "• Why: More robust to outliers than MSE, focuses on important predictions"
         )
         fig.add_annotation(
             x=4.5,
