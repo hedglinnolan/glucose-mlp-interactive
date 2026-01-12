@@ -181,6 +181,264 @@ def calculate_node_positions(architecture: Dict, width: float = 10.0,
     return node_positions, layer_info
 
 
+def create_training_visualization(architecture: Dict, node_positions: List[Tuple[float, float]],
+                                 layer_info: Dict, sample_input: np.ndarray,
+                                 model: nn.Module, epoch: int, 
+                                 phase: str = "forward",  # "forward" or "backward"
+                                 target: Optional[float] = None,
+                                 prediction: Optional[float] = None) -> go.Figure:
+    """
+    Create a single-frame visualization for training display.
+    Shows network architecture with current forward or backward pass state.
+    
+    Args:
+        architecture: Architecture dictionary
+        node_positions: Node positions
+        layer_info: Layer information
+        sample_input: Sample input for visualization
+        model: Current model state
+        epoch: Current epoch number
+        phase: "forward" or "backward"
+        target: Target value (for backward pass)
+        prediction: Prediction value (for backward pass)
+        
+    Returns:
+        Plotly figure
+    """
+    layer_sizes = architecture['layer_sizes']
+    num_layers = len(layer_sizes)
+    
+    fig = go.Figure()
+    
+    # Get activations for forward pass
+    model.eval()
+    with torch.no_grad():
+        x = torch.FloatTensor(sample_input).unsqueeze(0)
+        activations = [sample_input.copy()]
+        
+        # Capture activations through layers
+        current = x
+        for module in model.modules():
+            if isinstance(module, nn.Linear):
+                current = module(current)
+                activations.append(current.squeeze(0).cpu().numpy())
+            elif isinstance(module, nn.ReLU):
+                current = module(current)
+                activations[-1] = current.squeeze(0).cpu().numpy()
+    
+    # Ensure activations match layer sizes
+    while len(activations) < len(layer_sizes):
+        activations.append(np.zeros(layer_sizes[len(activations)]))
+    
+    # Draw edges
+    for layer_idx in range(num_layers - 1):
+        from_nodes = layer_info[layer_idx]
+        to_nodes = layer_info[layer_idx + 1]
+        
+        for from_node in from_nodes:
+            for to_node in to_nodes:
+                from_pos = node_positions[from_node]
+                to_pos = node_positions[to_node]
+                
+                # Color edges based on phase
+                if phase == "forward":
+                    edge_color = 'rgba(0, 150, 255, 0.4)'
+                else:
+                    edge_color = 'rgba(255, 100, 0, 0.4)'
+                
+                fig.add_trace(go.Scatter(
+                    x=[from_pos[0], to_pos[0]],
+                    y=[from_pos[1], to_pos[1]],
+                    mode='lines',
+                    line=dict(color=edge_color, width=0.8),
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
+    
+    # Draw nodes with values
+    node_values = []
+    node_colors = []
+    node_sizes = []
+    node_texts = []
+    
+    for layer_idx, layer_size in enumerate(layer_sizes):
+        if layer_idx < len(activations):
+            layer_activation = activations[layer_idx]
+            for i in range(layer_size):
+                if i < len(layer_activation):
+                    value = float(layer_activation[i])
+                    node_values.append(value)
+                    # Color by activation value
+                    intensity = min(abs(value) * 0.2, 1.0)
+                    if value > 0:
+                        node_color = f'rgba(0, 150, 255, {0.3 + intensity * 0.7})'
+                    else:
+                        node_color = f'rgba(255, 100, 0, {0.3 + intensity * 0.7})'
+                    node_texts.append(f'{value:.2f}')
+                else:
+                    node_values.append(0.0)
+                    node_color = 'rgba(200, 200, 200, 0.5)'
+                    node_texts.append('')
+                
+                node_colors.append(node_color)
+                node_sizes.append(12)
+    
+    # Add node scatter plot
+    fig.add_trace(go.Scatter(
+        x=[pos[0] for pos in node_positions],
+        y=[pos[1] for pos in node_positions],
+        mode='markers+text',
+        marker=dict(
+            size=node_sizes,
+            color=node_colors,
+            line=dict(width=1.5, color='white')
+        ),
+        text=node_texts,
+        textposition='middle center',
+        textfont=dict(size=7, color='white', family='Arial Black'),
+        showlegend=False,
+        hoverinfo='skip'
+    ))
+    
+    # Add layer labels
+    for layer_idx in range(num_layers):
+        x_pos = node_positions[layer_info[layer_idx][0]][0]
+        layer_size = layer_sizes[layer_idx]
+        
+        if layer_idx == 0:
+            label = f'Input\n({layer_size})'
+        elif layer_idx == num_layers - 1:
+            label = f'Output\n({layer_size})'
+        else:
+            label = f'Hidden {layer_idx}\n({layer_size})'
+        
+        fig.add_annotation(
+            x=x_pos,
+            y=-0.5,
+            text=label,
+            showarrow=False,
+            font=dict(size=10, color='black'),
+            bgcolor='rgba(255, 255, 255, 0.9)',
+            bordercolor='black',
+            borderwidth=1
+        )
+    
+    # Add title with phase and epoch info
+    phase_text = "Forward Pass" if phase == "forward" else "Backpropagation"
+    title = f"🧠 Neural Network Training - Epoch {epoch} | {phase_text}"
+    if prediction is not None and target is not None:
+        title += f" | Pred: {prediction:.2f}, Target: {target:.2f}"
+    
+    fig.update_layout(
+        title=title,
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1, 11]),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-1, 9]),
+        plot_bgcolor='white',
+        height=500,
+        margin=dict(l=20, r=20, t=60, b=50)
+    )
+    
+    return fig
+
+
+def simulate_forward_pass(architecture: Dict, sample_input: np.ndarray, 
+                         model: Optional[nn.Module] = None) -> List[np.ndarray]:
+    """
+    Simulate forward pass through the network.
+    
+    Args:
+        architecture: Architecture dictionary
+        sample_input: Single input sample (1D array)
+        model: Optional model to get actual activations
+        
+    Returns:
+        List of activations for each layer
+    """
+    activations = [sample_input.copy()]
+    
+    if model is not None:
+        # Use actual model to get real activations
+        model.eval()
+        with torch.no_grad():
+            x = torch.FloatTensor(sample_input).unsqueeze(0)
+            
+            # Hook to capture activations
+            layer_activations = []
+            
+            def hook_fn(module, input, output):
+                layer_activations.append(output.squeeze(0).cpu().numpy())
+            
+            hooks = []
+            for module in model.modules():
+                if isinstance(module, nn.Linear) or isinstance(module, nn.ReLU):
+                    hooks.append(module.register_forward_hook(hook_fn))
+            
+            _ = model(x)
+            
+            # Clean up hooks
+            for hook in hooks:
+                hook.remove()
+            
+            # Combine activations appropriately
+            # This is simplified - in practice, you'd need to handle ReLU separately
+            activations = [sample_input]
+            idx = 0
+            for i, size in enumerate(architecture['layer_sizes'][1:], 1):
+                if idx < len(layer_activations):
+                    # Take first size elements
+                    act = layer_activations[idx][:size] if len(layer_activations[idx]) >= size else layer_activations[idx]
+                    activations.append(act)
+                    idx += 1
+                else:
+                    # Fallback to random values for visualization
+                    activations.append(np.random.randn(size) * 0.1)
+    else:
+        # Simulate forward pass with random activations
+        current = sample_input
+        for layer_size in architecture['layer_sizes'][1:]:
+            # Simple simulation: random activations
+            current = np.random.randn(layer_size) * 0.5 + np.mean(current)
+            # Apply ReLU-like behavior
+            current = np.maximum(current, 0)
+            activations.append(current)
+    
+    return activations
+
+
+def simulate_backward_pass(architecture: Dict, activations: List[np.ndarray],
+                          target: float, prediction: float) -> List[np.ndarray]:
+    """
+    Simulate backward pass (gradient flow) through the network.
+    
+    Args:
+        architecture: Architecture dictionary
+        activations: Activations from forward pass
+        target: Target value
+        prediction: Predicted value
+        
+    Returns:
+        List of gradients for each layer (backward order)
+    """
+    # Start with output gradient (error)
+    error = prediction - target
+    gradients = [np.array([error])]
+    
+    # Simulate gradient flow backward
+    # In reality, gradients would be computed via chain rule
+    # Here we simulate for visualization purposes
+    for i in range(len(activations) - 2, -1, -1):
+        # Gradient flows backward, typically getting smaller
+        prev_grad = gradients[0]
+        # Simulate gradient propagation
+        grad = np.random.randn(len(activations[i])) * np.mean(np.abs(prev_grad)) * 0.3
+        # Apply some structure based on activations
+        grad = grad * (activations[i] > 0).astype(float)  # ReLU gradient
+        gradients.insert(0, grad)
+    
+    return gradients
+
+
+# Keep the old functions for the post-training visualization
 def create_network_graph(architecture: Dict, node_positions: List[Tuple[float, float]], 
                          layer_info: Dict, highlight_nodes: Optional[List[int]] = None,
                          highlight_edges: Optional[List[Tuple[int, int]]] = None,
@@ -315,103 +573,6 @@ def create_network_graph(architecture: Dict, node_positions: List[Tuple[float, f
     )
     
     return fig
-
-
-def simulate_forward_pass(architecture: Dict, sample_input: np.ndarray, 
-                         model: Optional[nn.Module] = None) -> List[np.ndarray]:
-    """
-    Simulate forward pass through the network.
-    
-    Args:
-        architecture: Architecture dictionary
-        sample_input: Single input sample (1D array)
-        model: Optional model to get actual activations
-        
-    Returns:
-        List of activations for each layer
-    """
-    activations = [sample_input.copy()]
-    
-    if model is not None:
-        # Use actual model to get real activations
-        model.eval()
-        with torch.no_grad():
-            x = torch.FloatTensor(sample_input).unsqueeze(0)
-            
-            # Hook to capture activations
-            layer_activations = []
-            
-            def hook_fn(module, input, output):
-                layer_activations.append(output.squeeze(0).cpu().numpy())
-            
-            hooks = []
-            for module in model.modules():
-                if isinstance(module, nn.Linear) or isinstance(module, nn.ReLU):
-                    hooks.append(module.register_forward_hook(hook_fn))
-            
-            _ = model(x)
-            
-            # Clean up hooks
-            for hook in hooks:
-                hook.remove()
-            
-            # Combine activations appropriately
-            # This is simplified - in practice, you'd need to handle ReLU separately
-            activations = [sample_input]
-            idx = 0
-            for i, size in enumerate(architecture['layer_sizes'][1:], 1):
-                if idx < len(layer_activations):
-                    # Take first size elements
-                    act = layer_activations[idx][:size] if len(layer_activations[idx]) >= size else layer_activations[idx]
-                    activations.append(act)
-                    idx += 1
-                else:
-                    # Fallback to random values for visualization
-                    activations.append(np.random.randn(size) * 0.1)
-    else:
-        # Simulate forward pass with random activations
-        current = sample_input
-        for layer_size in architecture['layer_sizes'][1:]:
-            # Simple simulation: random activations
-            current = np.random.randn(layer_size) * 0.5 + np.mean(current)
-            # Apply ReLU-like behavior
-            current = np.maximum(current, 0)
-            activations.append(current)
-    
-    return activations
-
-
-def simulate_backward_pass(architecture: Dict, activations: List[np.ndarray],
-                          target: float, prediction: float) -> List[np.ndarray]:
-    """
-    Simulate backward pass (gradient flow) through the network.
-    
-    Args:
-        architecture: Architecture dictionary
-        activations: Activations from forward pass
-        target: Target value
-        prediction: Predicted value
-        
-    Returns:
-        List of gradients for each layer (backward order)
-    """
-    # Start with output gradient (error)
-    error = prediction - target
-    gradients = [np.array([error])]
-    
-    # Simulate gradient flow backward
-    # In reality, gradients would be computed via chain rule
-    # Here we simulate for visualization purposes
-    for i in range(len(activations) - 2, -1, -1):
-        # Gradient flows backward, typically getting smaller
-        prev_grad = gradients[0]
-        # Simulate gradient propagation
-        grad = np.random.randn(len(activations[i])) * np.mean(np.abs(prev_grad)) * 0.3
-        # Apply some structure based on activations
-        grad = grad * (activations[i] > 0).astype(float)  # ReLU gradient
-        gradients.insert(0, grad)
-    
-    return gradients
 
 
 def create_animated_forward_pass(architecture: Dict, node_positions: List[Tuple[float, float]],
@@ -606,76 +767,6 @@ def create_animated_forward_pass(architecture: Dict, node_positions: List[Tuple[
     )
     
     return fig
-
-
-def animate_forward_pass(architecture: Dict, node_positions: List[Tuple[float, float]],
-                        layer_info: Dict, sample_input: np.ndarray,
-                        model: Optional[nn.Module] = None, 
-                        num_frames: int = 20) -> List[go.Figure]:
-    """
-    Create animation frames for forward pass.
-    
-    Args:
-        architecture: Architecture dictionary
-        node_positions: Node positions
-        layer_info: Layer information
-        sample_input: Input sample
-        model: Optional model for real activations
-        num_frames: Number of animation frames
-        
-    Returns:
-        List of Plotly figures (one per frame)
-    """
-    activations = simulate_forward_pass(architecture, sample_input, model)
-    frames = []
-    
-    # Create frames showing progressive activation
-    for frame_idx in range(num_frames):
-        progress = (frame_idx + 1) / num_frames
-        
-        # Determine which layers are active at this frame
-        num_active_layers = int(np.ceil(progress * len(activations)))
-        
-        # Build node values and highlights
-        node_values = []
-        highlight_nodes = []
-        highlight_edges = []
-        
-        node_idx = 0
-        for layer_idx, layer_size in enumerate(architecture['layer_sizes']):
-            if layer_idx < num_active_layers:
-                # Layer is active
-                layer_activation = activations[layer_idx]
-                for i in range(layer_size):
-                    if i < len(layer_activation):
-                        node_values.append(layer_activation[i])
-                    else:
-                        node_values.append(0.0)
-                    highlight_nodes.append(node_idx)
-                    
-                    # Highlight edges from previous layer
-                    if layer_idx > 0:
-                        prev_layer_nodes = layer_info[layer_idx - 1]
-                        for prev_node in prev_layer_nodes:
-                            highlight_edges.append((prev_node, node_idx))
-                    
-                    node_idx += 1
-            else:
-                # Layer not yet active
-                for _ in range(layer_size):
-                    node_values.append(0.0)
-                    node_idx += 1
-        
-        # Create figure for this frame
-        fig = create_network_graph(
-            architecture, node_positions, layer_info,
-            highlight_nodes=highlight_nodes,
-            highlight_edges=highlight_edges,
-            node_values=node_values
-        )
-        frames.append(fig)
-    
-    return frames
 
 
 def create_animated_backward_pass(architecture: Dict, node_positions: List[Tuple[float, float]],
@@ -877,82 +968,3 @@ def create_animated_backward_pass(architecture: Dict, node_positions: List[Tuple
     )
     
     return fig
-
-
-def animate_backward_pass(architecture: Dict, node_positions: List[Tuple[float, float]],
-                         layer_info: Dict, activations: List[np.ndarray],
-                         target: float, prediction: float,
-                         num_frames: int = 20) -> List[go.Figure]:
-    """
-    Create animation frames for backward pass (backpropagation).
-    
-    Args:
-        architecture: Architecture dictionary
-        node_positions: Node positions
-        layer_info: Layer information
-        activations: Activations from forward pass
-        target: Target value
-        prediction: Predicted value
-        num_frames: Number of animation frames
-        
-    Returns:
-        List of Plotly figures (one per frame)
-    """
-    gradients = simulate_backward_pass(architecture, activations, target, prediction)
-    frames = []
-    
-    # Create frames showing progressive gradient flow (backward)
-    for frame_idx in range(num_frames):
-        progress = (frame_idx + 1) / num_frames
-        
-        # Determine which layers have gradients at this frame
-        # Gradients flow backward, so we count from output
-        num_gradient_layers = int(np.ceil(progress * len(gradients)))
-        start_layer = len(architecture['layer_sizes']) - num_gradient_layers
-        
-        # Build node values and highlights
-        node_values = []
-        highlight_nodes = []
-        highlight_edges = []
-        
-        node_idx = 0
-        for layer_idx, layer_size in enumerate(architecture['layer_sizes']):
-            if layer_idx >= start_layer:
-                # Layer has gradient
-                grad_idx = layer_idx - start_layer
-                if grad_idx < len(gradients):
-                    layer_grad = gradients[grad_idx]
-                    for i in range(layer_size):
-                        if i < len(layer_grad):
-                            node_values.append(layer_grad[i])
-                        else:
-                            node_values.append(0.0)
-                        highlight_nodes.append(node_idx)
-                        
-                        # Highlight edges to next layer (gradients flow backward)
-                        if layer_idx < len(architecture['layer_sizes']) - 1:
-                            next_layer_nodes = layer_info[layer_idx + 1]
-                            for next_node in next_layer_nodes:
-                                highlight_edges.append((node_idx, next_node))
-                        
-                        node_idx += 1
-                else:
-                    for _ in range(layer_size):
-                        node_values.append(0.0)
-                        node_idx += 1
-            else:
-                # Layer doesn't have gradient yet
-                for _ in range(layer_size):
-                    node_values.append(0.0)
-                    node_idx += 1
-        
-        # Create figure for this frame
-        fig = create_network_graph(
-            architecture, node_positions, layer_info,
-            highlight_nodes=highlight_nodes,
-            highlight_edges=highlight_edges,
-            node_values=node_values
-        )
-        frames.append(fig)
-    
-    return frames
