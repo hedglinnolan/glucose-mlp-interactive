@@ -415,3 +415,17 @@ if use_shap:
     except Exception as e:
         st.error(f"❌ Error setting up SHAP: {str(e)}")
         logger.exception(e)
+
+# State Debug (Advanced)
+with st.expander("🔧 Advanced / State Debug", expanded=False):
+    st.markdown("**Current State:**")
+    st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
+    st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
+    st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
+    task_det = st.session_state.get('task_type_detection')
+    cohort_det = st.session_state.get('cohort_structure_detection')
+    st.write(f"• Task type (final): {task_det.final if task_det else 'None'}")
+    st.write(f"• Cohort type (final): {cohort_det.final if cohort_det else 'None'}")
+    st.write(f"• Trained models: {len(st.session_state.get('trained_models', {}))}")
+    st.write(f"• Permutation importance: {len(st.session_state.get('permutation_importance', {}))}")
+    st.write(f"• Partial dependence: {len(st.session_state.get('partial_dependence', {}))}")

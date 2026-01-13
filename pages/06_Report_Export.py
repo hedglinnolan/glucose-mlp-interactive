@@ -320,3 +320,12 @@ with col2:
     )
 
 st.success("✅ Report generated successfully!")
+
+# State Debug (Advanced)
+with st.expander("🔧 Advanced / State Debug", expanded=False):
+    st.markdown("**Current State:**")
+    st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
+    st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
+    st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
+    st.write(f"• Trained models: {len(trained_models)}")
+    st.write(f"• Report data: {'Available' if st.session_state.get('report_data') else 'Not generated'}")

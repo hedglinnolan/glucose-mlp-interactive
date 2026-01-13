@@ -173,7 +173,19 @@ if st.session_state.get('preprocessing_pipeline') is not None:
     recipe = get_pipeline_recipe(existing_pipeline)
     st.code(recipe, language=None)
     
-    if st.button("🔄 Rebuild Pipeline"):
+    if st.button("🔄 Rebuild Pipeline", key="preprocess_rebuild_button"):
         st.session_state.preprocessing_pipeline = None
         st.session_state.preprocessing_config = None
         st.rerun()
+
+# State Debug (Advanced)
+with st.expander("🔧 Advanced / State Debug", expanded=False):
+    st.markdown("**Current State:**")
+    st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
+    st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
+    st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
+    st.write(f"• Preprocessing pipeline: {'Built' if st.session_state.get('preprocessing_pipeline') else 'Not built'}")
+    preprocessing_config = st.session_state.get('preprocessing_config')
+    if preprocessing_config:
+        st.write(f"• Numeric imputation: {preprocessing_config.get('numeric_imputation', 'N/A')}")
+        st.write(f"• Numeric scaling: {preprocessing_config.get('numeric_scaling', 'N/A')}")
