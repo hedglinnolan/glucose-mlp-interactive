@@ -307,8 +307,9 @@ glucose-mlp-interactive/
 
 ## 📚 Additional Resources
 
-- [Development Workflow Guide](DEVELOPMENT.md)
-- [Deployment Guide](DEPLOYMENT.md)
+- [Quick Start Guide](QUICKSTART.md) - Detailed setup instructions and troubleshooting
+- [Development Workflow Guide](DEVELOPMENT.md) - For contributors
+- [Deployment Guide](DEPLOYMENT.md) - Deployment options
 
 ## 👤 Author
 
