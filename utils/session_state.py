@@ -3,11 +3,57 @@ Session state management for multi-page Streamlit app.
 Defines schema and initialization functions.
 """
 import streamlit as st
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 from dataclasses import dataclass, field
 from sklearn.pipeline import Pipeline
 import pandas as pd
 import numpy as np
+
+
+@dataclass
+class TaskTypeDetection:
+    """Task type detection results and overrides."""
+    detected: Optional[Literal["regression", "classification"]] = None
+    confidence: Optional[Literal["low", "med", "high"]] = None
+    reasons: List[str] = field(default_factory=list)
+    override_enabled: bool = False
+    override_value: Optional[Literal["regression", "classification"]] = None
+    
+    @property
+    def final(self) -> Optional[Literal["regression", "classification"]]:
+        """Get final task type (override if enabled, else detected)."""
+        if self.override_enabled and self.override_value is not None:
+            return self.override_value
+        return self.detected
+
+
+@dataclass
+class CohortStructureDetection:
+    """Cohort structure detection results and overrides."""
+    detected: Optional[Literal["cross_sectional", "longitudinal"]] = None
+    confidence: Optional[Literal["low", "med", "high"]] = None
+    reasons: List[str] = field(default_factory=list)
+    override_enabled: bool = False
+    override_value: Optional[Literal["cross_sectional", "longitudinal"]] = None
+    entity_id_candidates: List[str] = field(default_factory=list)
+    entity_id_detected: Optional[str] = None
+    entity_id_override_enabled: bool = False
+    entity_id_override_value: Optional[str] = None
+    time_column_candidates: List[str] = field(default_factory=list)
+    
+    @property
+    def final(self) -> Optional[Literal["cross_sectional", "longitudinal"]]:
+        """Get final cohort type (override if enabled, else detected)."""
+        if self.override_enabled and self.override_value is not None:
+            return self.override_value
+        return self.detected
+    
+    @property
+    def entity_id_final(self) -> Optional[str]:
+        """Get final entity ID column (override if enabled, else detected)."""
+        if self.entity_id_override_enabled and self.entity_id_override_value is not None:
+            return self.entity_id_override_value
+        return self.entity_id_detected
 
 
 @dataclass
@@ -16,7 +62,7 @@ class DataConfig:
     target_col: Optional[str] = None
     feature_cols: List[str] = field(default_factory=list)
     datetime_col: Optional[str] = None  # For time-series splits
-    task_type: Optional[str] = None  # 'regression' or 'classification'
+    task_type: Optional[str] = None  # 'regression' or 'classification' (DEPRECATED: use task_type_detection.final)
 
 
 @dataclass
@@ -59,6 +105,10 @@ def init_session_state():
         'raw_data': None,
         'data_config': DataConfig(),
         'data_audit': None,
+        
+        # Detection and triage
+        'task_type_detection': TaskTypeDetection(),
+        'cohort_structure_detection': CohortStructureDetection(),
         
         # Preprocessing
         'preprocessing_pipeline': None,
