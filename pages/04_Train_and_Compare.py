@@ -25,6 +25,7 @@ from ml.eval import (
     calculate_regression_metrics, calculate_classification_metrics,
     perform_cross_validation, analyze_residuals
 )
+from ml.splits import to_numpy_1d
 try:
     from visualizations import plot_training_history, plot_predictions_vs_actual, plot_residuals
 except ImportError:
@@ -175,22 +176,24 @@ if st.button("🔄 Prepare Splits", type="primary"):
         # Split data (group-based, time-based, or random)
         if use_group_split and entity_id_final:
             # Group-based split for longitudinal data
-            groups = df[entity_id_final].values
+            groups = to_numpy_1d(df[entity_id_final])
+            y_arr = to_numpy_1d(y)
+            
             gss = GroupShuffleSplit(n_splits=1, test_size=(val_size + test_size), random_state=split_config.random_state)
-            train_idx, temp_idx = next(gss.split(X_transformed, y, groups))
+            train_idx, temp_idx = next(gss.split(X_transformed, y_arr, groups))
             
             # Split temp into val and test, maintaining groups
             groups_temp = groups[temp_idx]
             rel_val = val_size / (val_size + test_size)
             gss2 = GroupShuffleSplit(n_splits=1, test_size=(1 - rel_val), random_state=split_config.random_state)
-            val_idx, test_idx = next(gss2.split(X_transformed[temp_idx], y.iloc[temp_idx], groups_temp))
+            val_idx, test_idx = next(gss2.split(X_transformed[temp_idx], y_arr[temp_idx], groups_temp))
             
             X_train = X_transformed[train_idx]
             X_val = X_transformed[temp_idx[val_idx]]
             X_test = X_transformed[temp_idx[test_idx]]
-            y_train = y.iloc[train_idx].values
-            y_val = y.iloc[temp_idx[val_idx]].values
-            y_test = y.iloc[temp_idx[test_idx]].values
+            y_train = y_arr[train_idx]
+            y_val = y_arr[temp_idx[val_idx]]
+            y_test = y_arr[temp_idx[test_idx]]
             
             n_train_groups = len(np.unique(groups[train_idx]))
             n_val_groups = len(np.unique(groups[temp_idx[val_idx]]))
@@ -214,9 +217,9 @@ if st.button("🔄 Prepare Splits", type="primary"):
             X_train = X_transformed[train_indices]
             X_val = X_transformed[val_indices]
             X_test = X_transformed[test_indices]
-            y_train = y.iloc[train_indices].values
-            y_val = y.iloc[val_indices].values
-            y_test = y.iloc[test_indices].values
+            y_train = to_numpy_1d(y.iloc[train_indices])
+            y_val = to_numpy_1d(y.iloc[val_indices])
+            y_test = to_numpy_1d(y.iloc[test_indices])
             
             st.info(f"⏰ Time-based split: Train={df_with_datetime.iloc[0][data_config.datetime_col]} to {df_with_datetime.iloc[n_train-1][data_config.datetime_col]}")
         elif split_config.stratify and task_type_final == 'classification':
@@ -244,7 +247,7 @@ if st.button("🔄 Prepare Splits", type="primary"):
         from ml.pipeline import get_feature_names_after_transform
         feature_names = get_feature_names_after_transform(pipeline, data_config.feature_cols)
         
-        set_splits(X_train, X_val, X_test, y_train.values, y_val.values, y_test.values, list(feature_names))
+        set_splits(X_train, X_val, X_test, to_numpy_1d(y_train), to_numpy_1d(y_val), to_numpy_1d(y_test), list(feature_names))
         st.success(f"✅ Splits prepared: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
     except Exception as e:
         st.error(f"❌ Error preparing splits: {str(e)}")

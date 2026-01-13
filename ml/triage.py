@@ -117,8 +117,15 @@ def detect_cohort_structure(df: pd.DataFrame, sample_size: int = 1000) -> Dict:
     # Pattern matching for entity ID columns (case-insensitive)
     entity_id_patterns = [
         'patient', 'subject', 'person', 'respondent', 'participant',
-        'member', 'id', 'mrn', 'subject_id', 'patient_id', 'person_id',
-        'respondent_id', 'participant_id', 'member_id'
+        'member', 'mrn', 'subject_id', 'patient_id', 'person_id',
+        'respondent_id', 'participant_id', 'member_id', 'record', 'encounter'
+    ]
+    
+    # Exclude clinical measurement patterns (NOT entity IDs)
+    clinical_measurement_patterns = [
+        'glucose', 'triglyceride', 'cholesterol', 'bmi', 'waist', 
+        'weight', 'height', 'bp', 'blood_pressure', 'kcal', 'hba1c',
+        'insulin', 'ldl', 'hdl', 'creatinine', 'albumin'
     ]
     
     # Pattern matching for time columns (case-insensitive)
@@ -128,15 +135,40 @@ def detect_cohort_structure(df: pd.DataFrame, sample_size: int = 1000) -> Dict:
         'baseline', 'followup', 'follow_up'
     ]
     
-    # Find candidate entity ID columns
+    # Find candidate entity ID columns with stricter criteria
     for col in df.columns:
         col_lower = col.lower()
         # Skip obvious index columns
         if col_lower in ['index', 'row', 'row_number', 'unnamed: 0']:
             continue
+        
+        # Exclude if it matches clinical measurement patterns
+        if any(pattern in col_lower for pattern in clinical_measurement_patterns):
+            continue
+        
         # Check for entity ID patterns
         if any(pattern in col_lower for pattern in entity_id_patterns):
-            entity_id_candidates.append(col)
+            # Additional checks: must be high cardinality and discrete
+            n_unique = df[col].nunique()
+            unique_ratio = n_unique / len(df) if len(df) > 0 else 0
+            
+            # Require high cardinality (>= 0.5) and discrete-looking
+            is_discrete = (
+                df[col].dtype in [np.int64, np.int32, 'int64', 'int32', 'int'] or
+                (df[col].dtype == 'object' and unique_ratio > 0.5)
+            )
+            
+            # Exclude float continuous columns unless integer-like
+            if df[col].dtype in [np.float64, np.float32, 'float64', 'float32', 'float']:
+                # Check if values are integer-like (small decimal variance)
+                sample = df[col].dropna().head(100)
+                if len(sample) > 0:
+                    decimal_parts = sample - sample.round()
+                    if (decimal_parts.abs() > 0.01).any():
+                        continue  # Skip if has significant decimals
+            
+            if unique_ratio >= 0.5 and is_discrete:
+                entity_id_candidates.append(col)
     
     # Find candidate time columns
     for col in df.columns:
@@ -159,9 +191,10 @@ def detect_cohort_structure(df: pd.DataFrame, sample_size: int = 1000) -> Dict:
     # Remove duplicates
     time_column_candidates = list(set(time_column_candidates))
     
-    # Analyze entity ID candidates
+    # Analyze entity ID candidates with evidence of repeated measures
     best_entity_id = None
     best_median_rows = 0
+    best_repeat_rate = 0
     
     for entity_col in entity_id_candidates:
         if entity_col not in df.columns:
@@ -171,22 +204,38 @@ def detect_cohort_structure(df: pd.DataFrame, sample_size: int = 1000) -> Dict:
         entity_counts = df[entity_col].value_counts()
         median_rows = entity_counts.median()
         
-        if median_rows > best_median_rows:
+        # Check repeat rate (% of entities with >1 row)
+        n_repeated = (entity_counts > 1).sum()
+        repeat_rate = n_repeated / len(entity_counts) if len(entity_counts) > 0 else 0
+        
+        # Require evidence of repeated measures: median >= 2 OR repeat_rate > 10%
+        has_repeated_measures = median_rows >= 2 or repeat_rate > 0.1
+        
+        if has_repeated_measures and (median_rows > best_median_rows or repeat_rate > best_repeat_rate):
             best_median_rows = median_rows
+            best_repeat_rate = repeat_rate
             best_entity_id = entity_col
     
     # Decision logic
-    if best_entity_id and best_median_rows > 1:
+    if best_entity_id and (best_median_rows >= 2 or best_repeat_rate > 0.1):
         detected = 'longitudinal'
-        confidence = 'high'
+        confidence = 'high' if best_median_rows >= 2 else 'med'
         reasons.append(
-            f"Found entity ID column '{best_entity_id}' with median {best_median_rows:.1f} rows per entity - longitudinal"
+            f"Found entity ID column '{best_entity_id}' with median {best_median_rows:.1f} rows per entity "
+            f"({best_repeat_rate:.0%} entities repeated) - longitudinal"
         )
-    elif best_entity_id and best_median_rows == 1:
+    elif best_entity_id and best_median_rows == 1 and best_repeat_rate <= 0.1:
         detected = 'cross_sectional'
         confidence = 'high'
         reasons.append(
             f"Found entity ID column '{best_entity_id}' but only 1 row per entity - cross-sectional"
+        )
+    elif len(entity_id_candidates) > 0:
+        # Had candidates but no repeated measures
+        detected = 'cross_sectional'
+        confidence = 'med'
+        reasons.append(
+            f"Found {len(entity_id_candidates)} ID-like columns but no evidence of repeated measures"
         )
     elif len(time_column_candidates) > 0:
         # Check for duplicates suggesting repeated measures

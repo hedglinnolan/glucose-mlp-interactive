@@ -523,7 +523,9 @@ if df is not None:
             if datetime_col:
                 st.info("ℹ️ Datetime column selected. You can enable time-based splitting in the Train & Compare page.")
             
-            st.success(f"✅ Configuration saved: {task_type.title()} task with {len(selected_features)} features")
+            # Safe getter for task type display
+            task_type_display = task_type_final if task_type_final else (task_detection.detected if task_detection.detected else "regression")
+            st.success(f"✅ Configuration saved: {task_type_display.title()} task with {len(selected_features)} features")
             st.info(f"**Next:** Go to EDA page to explore your data")
         
     except Exception as e:

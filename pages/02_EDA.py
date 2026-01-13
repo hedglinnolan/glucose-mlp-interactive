@@ -125,6 +125,11 @@ for rec in recs_to_show:
             for item in rec.model_implications:
                 st.write(f"• {item}")
         
+        # Educational explanation
+        if rec.description:
+            with st.expander("📚 Explain this analysis"):
+                st.markdown(rec.description)
+        
         # Display results if available
         if rec.id in st.session_state.eda_results:
             result = st.session_state.eda_results[rec.id]
@@ -150,8 +155,10 @@ for rec in recs_to_show:
                     elif fig_type == 'table':
                         st.dataframe(fig_data, use_container_width=True)
 
-# Manual mode
-with st.expander("🔧 Manual Mode - Run Any Analysis"):
+st.markdown("---")
+
+# Manual mode (separate section)
+st.header("🔧 Manual Mode - Run Any Analysis")
     action_names = [
         'plausibility_check',
         'missingness_scan',

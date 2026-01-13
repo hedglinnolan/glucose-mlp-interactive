@@ -46,6 +46,7 @@ class EDARecommendation:
     what_you_learn: List[str]
     model_implications: List[str]
     run_action: str  # Name of analysis function to call
+    description: Optional[str] = None  # Plain-language explanation
     enabled: bool = True
     disabled_reason: Optional[str] = None
 
@@ -265,13 +266,22 @@ def recommend_eda(signals: DatasetSignals) -> List[EDARecommendation]:
             what_you_learn=[
                 "Which columns have missing data and at what rate",
                 "Whether missingness is associated with target (informative missingness)",
-                "Patterns suggesting MCAR vs MAR vs MNAR"
+                "Patterns suggesting MCAR (Missing Completely At Random) vs MAR (Missing At Random) vs MNAR (Missing Not At Random)"
             ],
             model_implications=[
                 "Informative missingness may require missingness indicators",
                 "High missing rates may need specialized imputation strategies"
             ],
-            run_action="missingness_scan"
+            run_action="missingness_scan",
+            description=(
+                "**What this is:** Analyzes patterns in missing data across columns and checks if missingness "
+                "is associated with the target variable.\n\n"
+                "**Why it matters:** If missingness is informative (associated with target), it contains signal "
+                "that models can use. MCAR means missing is random; MAR means missing depends on observed data; "
+                "MNAR means missing depends on unobserved values.\n\n"
+                "**How to interpret:** If target mean differs between missing/non-missing groups, missingness is "
+                "informative and you may want to add missingness indicator features."
+            )
         ))
     
     # R3: Cohort structure + split warning
@@ -316,7 +326,15 @@ def recommend_eda(signals: DatasetSignals) -> List[EDARecommendation]:
                 "Leakage columns must be excluded from features",
                 "High correlation may indicate data quality issues"
             ],
-            run_action="leakage_scan"  # Will use existing audit data
+            run_action="leakage_scan",
+            description=(
+                "**What this is:** Identifies columns that have suspiciously high correlation (>0.95) with the target, "
+                "which may indicate data leakage.\n\n"
+                "**Why it matters:** Data leakage occurs when features contain information that would not be available "
+                "at prediction time, leading to unrealistically high performance that won't generalize.\n\n"
+                "**How to interpret:** Columns flagged should be excluded from features unless you can verify they "
+                "are legitimate predictors available at prediction time."
+            )
         ))
     
     # R5: Target distribution
@@ -441,14 +459,22 @@ def recommend_eda(signals: DatasetSignals) -> List[EDARecommendation]:
             what_you_learn=[
                 "Feature clusters with high correlation",
                 "Redundant features that can be removed",
-                "Multicollinearity risks for GLM"
+                "Multicollinearity risks for GLM (Generalized Linear Model)"
             ],
             model_implications=[
                 "High collinearity → GLM coefficients unstable, use regularization",
-                "RF and NN are more robust to collinearity",
-                "Consider PCA or feature selection"
+                "RF (Random Forest) and NN (Neural Network) are more robust to collinearity",
+                "Consider PCA (Principal Component Analysis) or feature selection"
             ],
-            run_action="collinearity_map"
+            run_action="collinearity_map",
+            description=(
+                "**What this is:** Shows correlation heatmap between numeric features. High correlations (>0.85) "
+                "indicate collinearity (features are highly related).\n\n"
+                "**Why it matters:** Collinearity makes GLM coefficients unstable and hard to interpret. "
+                "Tree-based models (RF) and neural networks are more robust.\n\n"
+                "**How to interpret:** Clusters of highly correlated features may be redundant. Consider removing "
+                "one from each cluster or using dimensionality reduction."
+            )
         ))
     
     # R9: Outlier influence (regression)

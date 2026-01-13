@@ -15,6 +15,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, a
 import streamlit as st
 
 from ml.eval import calculate_regression_metrics, calculate_classification_metrics
+from ml.clinical_units import infer_unit
 
 
 def plausibility_check(
@@ -25,7 +26,7 @@ def plausibility_check(
     session_state: Any
 ) -> Dict[str, Any]:
     """
-    Check physiologic plausibility for common clinical columns.
+    Check physiologic plausibility for common clinical columns with unit inference.
     
     Returns:
         Dict with 'findings', 'warnings', 'figures'
@@ -34,54 +35,95 @@ def plausibility_check(
     warnings = []
     figures = []
     
-    # Conservative bounds for common clinical variables (heuristic, not authoritative)
-    plausibility_bounds = {
-        'bp_sys': (80, 200),  # Systolic BP (mmHg)
-        'bp_di': (40, 120),   # Diastolic BP (mmHg)
-        'bmi': (15, 50),      # BMI (kg/m²)
-        'waist': (50, 150),   # Waist circumference (cm)
-        'glucose': (3.5, 25.0),  # Glucose (mmol/L) or (70, 500) mg/dL
-        'hba1c': (4.0, 15.0), # HbA1c (%)
-        'triglyceride': (0.5, 5.0),  # Triglycerides (mmol/L) or (50, 500) mg/dL
-        'cholesterol': (2.0, 10.0),   # Total cholesterol (mmol/L) or (80, 400) mg/dL
-        'weight': (30, 200),  # Weight (kg)
-        'height': (100, 220), # Height (cm)
-        'kcal': (500, 5000),  # Daily calories
-    }
+    # Get unit overrides from session state
+    unit_overrides = session_state.get('unit_overrides', {})
     
     checked_cols = []
     out_of_range = []
+    unit_inferences = []
     
     for col in df.columns:
         col_lower = col.lower()
-        for pattern, (min_val, max_val) in plausibility_bounds.items():
-            if pattern in col_lower and col in signals.numeric_cols:
-                checked_cols.append(col)
-                col_data = df[col].dropna()
-                if len(col_data) > 0:
-                    below_min = (col_data < min_val).sum()
-                    above_max = (col_data > max_val).sum()
-                    total_out = below_min + above_max
-                    out_rate = total_out / len(col_data)
-                    
-                    if total_out > 0:
-                        out_of_range.append({
-                            'Column': col,
-                            'Min': col_data.min(),
-                            'Max': col_data.max(),
-                            'Below Range': below_min,
-                            'Above Range': above_max,
-                            'Out of Range %': f"{out_rate:.1%}"
-                        })
-                        if out_rate > 0.05:
-                            warnings.append(f"{col}: {out_rate:.1%} values outside plausible range ({min_val}-{max_val})")
+        # Check if this matches a known clinical variable pattern
+        is_clinical = any(
+            pattern in col_lower 
+            for pattern in ['weight', 'height', 'waist', 'glucose', 'cholesterol', 
+                          'triglyceride', 'bp_sys', 'bp_di', 'bmi', 'hba1c', 'kcal']
+        )
+        
+        if is_clinical and col in signals.numeric_cols:
+            checked_cols.append(col)
+            col_data = df[col].dropna()
+            
+            if len(col_data) > 0:
+                # Infer unit (or use override)
+                if col in unit_overrides:
+                    inferred_unit_info = {
+                        'inferred_unit': unit_overrides[col],
+                        'canonical_unit': 'unknown',
+                        'confidence': 'override',
+                        'explanation': f'User override: {unit_overrides[col]}',
+                        'conversion_factor': 1.0
+                    }
+                else:
+                    inferred_unit_info = infer_unit(col, col_data)
                 
-                break
+                unit_inferences.append({
+                    'Column': col,
+                    'Inferred Unit': inferred_unit_info.get('inferred_unit', 'Unknown'),
+                    'Canonical Unit': inferred_unit_info.get('canonical_unit', 'N/A'),
+                    'Confidence': inferred_unit_info.get('confidence', 'low'),
+                    'Explanation': inferred_unit_info.get('explanation', '')
+                })
+                
+                # If we have a canonical unit and conversion, check ranges
+                if inferred_unit_info.get('canonical_unit') and inferred_unit_info.get('conversion_factor'):
+                    # Get plausible range from clinical_units
+                    from ml.clinical_units import CLINICAL_VARIABLES
+                    matched_var = None
+                    for var_name in CLINICAL_VARIABLES.keys():
+                        if var_name in col_lower:
+                            matched_var = var_name
+                            break
+                    
+                    if matched_var:
+                        var_config = CLINICAL_VARIABLES[matched_var]
+                        # Find the hypothesis that matches inferred unit
+                        for unit_name, conv_factor, (min_val, max_val) in var_config['hypotheses']:
+                            if unit_name == inferred_unit_info['inferred_unit']:
+                                # Convert to canonical and check
+                                converted = col_data * conv_factor
+                                below_min = (converted < min_val).sum()
+                                above_max = (converted > max_val).sum()
+                                total_out = below_min + above_max
+                                out_rate = total_out / len(col_data)
+                                
+                                if total_out > 0:
+                                    out_of_range.append({
+                                        'Column': col,
+                                        'Inferred Unit': inferred_unit_info['inferred_unit'],
+                                        'Min (canonical)': f"{converted.min():.1f}",
+                                        'Max (canonical)': f"{converted.max():.1f}",
+                                        'Plausible Range': f"{min_val}-{max_val} {var_config['canonical_unit']}",
+                                        'Out of Range %': f"{out_rate:.1%}"
+                                    })
+                                    if out_rate > 0.05:
+                                        warnings.append(
+                                            f"{col}: {out_rate:.1%} values outside plausible range "
+                                            f"({min_val}-{max_val} {var_config['canonical_unit']}) "
+                                            f"after converting from {inferred_unit_info['inferred_unit']}"
+                                        )
+                                break
     
     findings.append(f"Checked {len(checked_cols)} columns with medical/nutritional patterns")
+    
+    if len(unit_inferences) > 0:
+        unit_df = pd.DataFrame(unit_inferences)
+        figures.append(('table', unit_df))
+        findings.append(f"Inferred units for {len(unit_inferences)} clinical variables")
+    
     if len(out_of_range) > 0:
         findings.append(f"Found {len(out_of_range)} columns with out-of-range values")
-        # Create table
         out_df = pd.DataFrame(out_of_range)
         figures.append(('table', out_df))
     else:
@@ -91,6 +133,10 @@ def plausibility_check(
     if signals.unit_sanity_flags:
         warnings.extend(signals.unit_sanity_flags)
         findings.append(f"Found {len(signals.unit_sanity_flags)} potential unit mismatch flags")
+    
+    # Add note about unit overrides
+    if unit_overrides:
+        findings.append(f"Using {len(unit_overrides)} user-specified unit overrides")
     
     return {
         'findings': findings,
