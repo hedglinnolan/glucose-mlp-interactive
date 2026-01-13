@@ -10,6 +10,7 @@ from typing import List, Dict, Any
 from utils.session_state import init_session_state, get_data, DataConfig, set_preprocessing_pipeline
 from ml.pipeline import build_preprocessing_pipeline, get_pipeline_recipe
 from data_processor import get_numeric_columns
+from utils.widget_helpers import safe_option_index
 
 init_session_state()
 
@@ -42,19 +43,37 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("Numeric Features")
     if numeric_features:
-        # Read from session_state or use defaults
+        # Read from session_state or use defaults - ensure config exists
         preprocessing_config = st.session_state.get('preprocessing_config', {})
+        if not preprocessing_config:
+            preprocessing_config = {}
+            st.session_state.preprocessing_config = preprocessing_config
+        
+        # Safe index computation
+        numeric_imputation_options = ['median', 'mean', 'constant']
+        numeric_imputation_idx = safe_option_index(
+            numeric_imputation_options,
+            preprocessing_config.get('numeric_imputation'),
+            'median'
+        )
         numeric_imputation = st.selectbox(
             "Imputation Strategy",
-            ['median', 'mean', 'constant'],
-            index=['median', 'mean', 'constant'].index(preprocessing_config.get('numeric_imputation', 'median')),
+            numeric_imputation_options,
+            index=numeric_imputation_idx,
             key="preprocess_numeric_imputation",
             help="How to handle missing numeric values"
         )
+        
+        numeric_scaling_options = ['standard', 'robust', 'none']
+        numeric_scaling_idx = safe_option_index(
+            numeric_scaling_options,
+            preprocessing_config.get('numeric_scaling'),
+            'standard'
+        )
         numeric_scaling = st.selectbox(
             "Scaling Strategy",
-            ['standard', 'robust', 'none'],
-            index=['standard', 'robust', 'none'].index(preprocessing_config.get('numeric_scaling', 'standard')),
+            numeric_scaling_options,
+            index=numeric_scaling_idx,
             key="preprocess_numeric_scaling",
             help="Feature scaling method"
         )
@@ -73,10 +92,16 @@ with col1:
 with col2:
     st.subheader("Categorical Features")
     if categorical_features:
+        categorical_imputation_options = ['most_frequent', 'constant']
+        categorical_imputation_idx = safe_option_index(
+            categorical_imputation_options,
+            preprocessing_config.get('categorical_imputation'),
+            'most_frequent'
+        )
         categorical_imputation = st.selectbox(
             "Imputation Strategy",
-            ['most_frequent', 'constant'],
-            index=['most_frequent', 'constant'].index(preprocessing_config.get('categorical_imputation', 'most_frequent')),
+            categorical_imputation_options,
+            index=categorical_imputation_idx,
             key="preprocess_categorical_imputation",
             help="How to handle missing categorical values"
         )

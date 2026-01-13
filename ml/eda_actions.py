@@ -68,13 +68,22 @@ def plausibility_check(
                 else:
                     inferred_unit_info = infer_unit(col, col_data)
                 
-                unit_inferences.append({
+                # Build unit inference row with threshold bands if available
+                unit_row = {
                     'Column': col,
                     'Inferred Unit': inferred_unit_info.get('inferred_unit', 'Unknown'),
                     'Canonical Unit': inferred_unit_info.get('canonical_unit', 'N/A'),
                     'Confidence': inferred_unit_info.get('confidence', 'low'),
                     'Explanation': inferred_unit_info.get('explanation', '')
-                })
+                }
+                
+                # Add fasting note if applicable
+                if inferred_unit_info.get('fasting_note'):
+                    unit_row['Note'] = 'Fasting assumption (reference ranges assume fasting state)'
+                else:
+                    unit_row['Note'] = ''
+                
+                unit_inferences.append(unit_row)
                 
                 # If we have a canonical unit and conversion, check ranges
                 if inferred_unit_info.get('canonical_unit') and inferred_unit_info.get('conversion_factor'):
@@ -88,30 +97,65 @@ def plausibility_check(
                     
                     if matched_var:
                         var_config = CLINICAL_VARIABLES[matched_var]
+                        thresholds = var_config.get('thresholds', {}).get(inferred_unit_info['inferred_unit'])
+                        fasting_note = var_config.get('fasting_note', False)
+                        
                         # Find the hypothesis that matches inferred unit
                         for unit_name, conv_factor, (min_val, max_val) in var_config['hypotheses']:
                             if unit_name == inferred_unit_info['inferred_unit']:
                                 # Convert to canonical and check
                                 converted = col_data * conv_factor
+                                
+                                # Classify values into threshold bands if available
+                                threshold_bands = {}
+                                if thresholds:
+                                    for band_name, (band_min, band_max) in thresholds.items():
+                                        if band_max is None:
+                                            # >= threshold
+                                            count = (converted >= band_min).sum()
+                                        else:
+                                            count = ((converted >= band_min) & (converted < band_max)).sum()
+                                        threshold_bands[band_name] = count
+                                
+                                # Check against overall plausible range
                                 below_min = (converted < min_val).sum()
                                 above_max = (converted > max_val).sum()
                                 total_out = below_min + above_max
                                 out_rate = total_out / len(col_data)
                                 
-                                if total_out > 0:
+                                # Build range description with threshold bands
+                                range_desc = f"{min_val}-{max_val} {var_config['canonical_unit']}"
+                                if thresholds:
+                                    band_names = {
+                                        'normal': 'Normal',
+                                        'prediabetes': 'Prediabetes',
+                                        'diabetes': 'Diabetes',
+                                        'borderline_high': 'Borderline High',
+                                        'high': 'High',
+                                        'very_high': 'Very High'
+                                    }
+                                    band_summary = []
+                                    for band_name, count in threshold_bands.items():
+                                        pct = count / len(col_data)
+                                        if pct > 0:
+                                            band_summary.append(f"{band_names.get(band_name, band_name)}: {pct:.1%}")
+                                    if band_summary:
+                                        range_desc += f" ({', '.join(band_summary)})"
+                                
+                                if total_out > 0 or (thresholds and any(v > 0 for v in threshold_bands.values() if 'normal' not in str(v))):
                                     out_of_range.append({
                                         'Column': col,
                                         'Inferred Unit': inferred_unit_info['inferred_unit'],
                                         'Min (canonical)': f"{converted.min():.1f}",
                                         'Max (canonical)': f"{converted.max():.1f}",
-                                        'Plausible Range': f"{min_val}-{max_val} {var_config['canonical_unit']}",
-                                        'Out of Range %': f"{out_rate:.1%}"
+                                        'Reference Range': range_desc,
+                                        'Out of Range %': f"{out_rate:.1%}" if total_out > 0 else "0%"
                                     })
                                     if out_rate > 0.05:
+                                        fasting_text = " (fasting assumption)" if fasting_note else ""
                                         warnings.append(
-                                            f"{col}: {out_rate:.1%} values outside plausible range "
-                                            f"({min_val}-{max_val} {var_config['canonical_unit']}) "
-                                            f"after converting from {inferred_unit_info['inferred_unit']}"
+                                            f"{col}: {out_rate:.1%} values outside typical reference range "
+                                            f"({range_desc}){fasting_text} after converting from {inferred_unit_info['inferred_unit']}"
                                         )
                                 break
     

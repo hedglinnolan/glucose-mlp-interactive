@@ -31,11 +31,24 @@ CLINICAL_VARIABLES = {
         ]
     },
     'glucose': {
-        'canonical_unit': 'mmol/L',
+        'canonical_unit': 'mg/dL',
         'hypotheses': [
-            ('mmol/L', 1.0, (3.5, 25.0)),
-            ('mg/dL', 0.0555, (70, 500))  # mg/dL to mmol/L: divide by 18
-        ]
+            ('mg/dL', 1.0, (70, 125)),  # Normal: 70-99, Prediabetes: 100-125 (fasting plasma glucose)
+            ('mmol/L', 18.0, (3.9, 6.9))  # mmol/L to mg/dL: multiply by 18 (Normal: 3.9-5.5, Prediabetes: 5.6-6.9)
+        ],
+        'thresholds': {
+            'mg/dL': {
+                'normal': (70, 99),
+                'prediabetes': (100, 125),
+                'diabetes': (126, None)  # >= 126
+            },
+            'mmol/L': {
+                'normal': (3.9, 5.5),
+                'prediabetes': (5.6, 6.9),
+                'diabetes': (7.0, None)  # >= 7.0
+            }
+        },
+        'fasting_note': True
     },
     'cholesterol': {
         'canonical_unit': 'mmol/L',
@@ -45,11 +58,26 @@ CLINICAL_VARIABLES = {
         ]
     },
     'triglyceride': {
-        'canonical_unit': 'mmol/L',
+        'canonical_unit': 'mg/dL',
         'hypotheses': [
-            ('mmol/L', 1.0, (0.5, 5.0)),
-            ('mg/dL', 0.0113, (50, 500))  # mg/dL to mmol/L: divide by 88.57
-        ]
+            ('mg/dL', 1.0, (50, 499)),  # Normal: <150, Borderline: 150-199, High: 200-499, Very high: >=500
+            ('mmol/L', 88.57, (0.57, 5.64))  # mmol/L to mg/dL: multiply by 88.57
+        ],
+        'thresholds': {
+            'mg/dL': {
+                'normal': (0, 149),  # < 150
+                'borderline_high': (150, 199),
+                'high': (200, 499),
+                'very_high': (500, None)  # >= 500
+            },
+            'mmol/L': {
+                'normal': (0, 1.68),  # < 1.69
+                'borderline_high': (1.69, 2.25),
+                'high': (2.26, 5.64),
+                'very_high': (5.65, None)  # >= 5.65
+            }
+        },
+        'fasting_note': True
     },
     'bp_sys': {
         'canonical_unit': 'mmHg',
@@ -182,12 +210,36 @@ def infer_unit(
     else:
         confidence = 'low'
     
-    explanation = f"{best_fit_pct:.0%} of values within plausible {canonical_unit} range after converting {unit_name}→{canonical_unit}"
+    # Build explanation with better detail
+    if confidence == 'high':
+        explanation = (
+            f"Inferred unit: {unit_name} (confidence: high). "
+            f"Rationale: after converting {unit_name}→{canonical_unit}, "
+            f"{best_fit_pct:.0%} of values fall within plausible adult reference ranges."
+        )
+    elif confidence == 'med':
+        explanation = (
+            f"Inferred unit: {unit_name} (confidence: medium). "
+            f"Rationale: after converting {unit_name}→{canonical_unit}, "
+            f"{best_fit_pct:.0%} of values fall within plausible ranges. "
+            f"Consider verifying unit or providing override if uncertain."
+        )
+    else:
+        explanation = (
+            f"Inferred unit: {unit_name} (confidence: low, uncertain). "
+            f"Only {best_fit_pct:.0%} of values fall within plausible ranges after conversion. "
+            f"Please verify unit and consider providing override."
+        )
+    
+    # Check if this variable has fasting note requirement
+    fasting_note = var_config.get('fasting_note', False)
     
     return {
         'inferred_unit': unit_name,
         'canonical_unit': canonical_unit,
         'confidence': confidence,
         'explanation': explanation,
-        'conversion_factor': conversion_factor
+        'conversion_factor': conversion_factor,
+        'thresholds': var_config.get('thresholds', {}).get(unit_name),
+        'fasting_note': fasting_note
     }
