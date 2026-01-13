@@ -16,11 +16,18 @@ from utils.session_state import (
     init_session_state, get_data, get_preprocessing_pipeline,
     DataConfig, SplitConfig, ModelConfig
 )
+from utils.storyline import render_progress_indicator, get_insights_by_category
+from ml.model_registry import get_registry
+from ml.model_coach import coach_recommendations
+from ml.eda_recommender import compute_dataset_signals
 
 init_session_state()
 
 st.set_page_config(page_title="Report Export", page_icon="📄", layout="wide")
 st.title("📄 Report Export")
+
+# Progress indicator
+render_progress_indicator("06_Report_Export")
 
 # Check prerequisites
 df = get_data()
@@ -57,7 +64,27 @@ def generate_report() -> str:
     report_lines.append(f"- **Target:** {data_config.target_col}")
     report_lines.append(f"- **Features:** {len(data_config.feature_cols)}")
     report_lines.append(f"- **Task Type:** {data_config.task_type}")
+    
+    # Task and cohort detection summary
+    task_det = st.session_state.get('task_type_detection')
+    cohort_det = st.session_state.get('cohort_structure_detection')
+    if task_det and task_det.detected:
+        report_lines.append(f"- **Task Detection:** {task_det.detected} ({task_det.confidence} confidence)")
+    if cohort_det and cohort_det.detected:
+        report_lines.append(f"- **Cohort Structure:** {cohort_det.detected} ({cohort_det.confidence} confidence)")
+        if cohort_det.entity_id_final:
+            report_lines.append(f"- **Entity ID:** {cohort_det.entity_id_final}")
     report_lines.append("")
+    
+    # Key EDA Insights
+    insights = get_insights_by_category()
+    if insights:
+        report_lines.append("## Key EDA Insights")
+        for insight in insights:
+            report_lines.append(f"### {insight.get('category', 'General').title()}")
+            report_lines.append(f"- **Finding:** {insight['finding']}")
+            report_lines.append(f"- **Implication:** {insight['implication']}")
+            report_lines.append("")
     
     # Data Audit Summary
     if data_audit:
@@ -95,30 +122,66 @@ def generate_report() -> str:
         report_lines.append("```")
         report_lines.append("")
     
+    # Model Selection Coach Recommendations (if available)
+    try:
+        task_type_detection = st.session_state.get('task_type_detection')
+        cohort_structure_detection = st.session_state.get('cohort_structure_detection')
+        task_type_final = task_type_detection.final if task_type_detection and task_type_detection.final else data_config.task_type
+        cohort_type_final = cohort_structure_detection.final if cohort_structure_detection and cohort_structure_detection.final else 'cross_sectional'
+        entity_id_final = cohort_structure_detection.entity_id_final if cohort_structure_detection else None
+        
+        signals = compute_dataset_signals(df, data_config.target_col, task_type_final, cohort_type_final, entity_id_final)
+        coach_recs = coach_recommendations(signals, st.session_state.get('eda_results'))
+        
+        if coach_recs:
+            report_lines.append("## Model Selection Coach Recommendations")
+            for rec in coach_recs[:3]:  # Top 3
+                report_lines.append(f"### {rec.group} Models (Priority: {rec.priority})")
+                report_lines.append("**Why:**")
+                for reason in rec.why:
+                    report_lines.append(f"- {reason}")
+                if rec.suggested_preprocessing:
+                    report_lines.append("**Suggested preprocessing:**")
+                    for prep in rec.suggested_preprocessing:
+                        report_lines.append(f"- {prep}")
+                report_lines.append(f"**Recommended models:** {', '.join(rec.recommended_models)}")
+                report_lines.append("")
+    except Exception:
+        pass  # Skip if coach fails
+    
     # Model Hyperparameters
     report_lines.append("## Model Hyperparameters")
     
-    if 'nn' in trained_models:
-        report_lines.append("### Neural Network")
-        report_lines.append(f"- Epochs: {model_config.nn_epochs}")
-        report_lines.append(f"- Batch Size: {model_config.nn_batch_size}")
-        report_lines.append(f"- Learning Rate: {model_config.nn_lr}")
-        report_lines.append(f"- Weight Decay: {model_config.nn_weight_decay}")
-        report_lines.append(f"- Early Stopping Patience: {model_config.nn_patience}")
-        report_lines.append(f"- Dropout: {model_config.nn_dropout}")
-        report_lines.append("")
+    registry = get_registry()
+    selected_model_params = st.session_state.get('selected_model_params', {})
     
-    if 'rf' in trained_models:
-        report_lines.append("### Random Forest")
-        report_lines.append(f"- N Estimators: {model_config.rf_n_estimators}")
-        report_lines.append(f"- Max Depth: {model_config.rf_max_depth or 'None'}")
-        report_lines.append(f"- Min Samples Leaf: {model_config.rf_min_samples_leaf}")
-        report_lines.append("")
-    
-    if 'huber' in trained_models:
-        report_lines.append("### GLM (Huber)")
-        report_lines.append(f"- Epsilon: {model_config.huber_epsilon}")
-        report_lines.append(f"- Alpha: {model_config.huber_alpha}")
+    for name in trained_models.keys():
+        spec = registry.get(name)
+        if spec:
+            report_lines.append(f"### {spec.name}")
+            # Get hyperparameters from selected_model_params or defaults
+            params = selected_model_params.get(name, spec.default_params)
+            for param_name, param_value in params.items():
+                report_lines.append(f"- {param_name}: {param_value}")
+        else:
+            # Fallback for existing models (nn, rf, glm, huber)
+            if name == 'nn':
+                report_lines.append("### Neural Network")
+                report_lines.append(f"- Epochs: {model_config.nn_epochs}")
+                report_lines.append(f"- Batch Size: {model_config.nn_batch_size}")
+                report_lines.append(f"- Learning Rate: {model_config.nn_lr}")
+                report_lines.append(f"- Weight Decay: {model_config.nn_weight_decay}")
+                report_lines.append(f"- Early Stopping Patience: {model_config.nn_patience}")
+                report_lines.append(f"- Dropout: {model_config.nn_dropout}")
+            elif name == 'rf':
+                report_lines.append("### Random Forest")
+                report_lines.append(f"- N Estimators: {model_config.rf_n_estimators}")
+                report_lines.append(f"- Max Depth: {model_config.rf_max_depth or 'None'}")
+                report_lines.append(f"- Min Samples Leaf: {model_config.rf_min_samples_leaf}")
+            elif name == 'huber':
+                report_lines.append("### GLM (Huber)")
+                report_lines.append(f"- Epsilon: {model_config.huber_epsilon}")
+                report_lines.append(f"- Alpha: {model_config.huber_alpha}")
         report_lines.append("")
     
     # Model Performance
@@ -192,11 +255,33 @@ def generate_report() -> str:
                     report_lines.append(values)
             report_lines.append("")
     
+    # Explainability Availability
+    report_lines.append("## Explainability Availability")
+    for name in trained_models.keys():
+        spec = registry.get(name)
+        if spec:
+            report_lines.append(f"### {spec.name}")
+            report_lines.append(f"- Permutation Importance: Available (all models)")
+            report_lines.append(f"- Partial Dependence: {'Available' if spec.capabilities.supports_partial_dependence else 'Not supported'}")
+            shap_support = spec.capabilities.supports_shap
+            if shap_support == 'none':
+                report_lines.append(f"- SHAP: Not supported")
+            elif shap_support == 'tree':
+                report_lines.append(f"- SHAP: Available (TreeExplainer)")
+            elif shap_support == 'linear':
+                report_lines.append(f"- SHAP: Available (LinearExplainer)")
+            else:
+                report_lines.append(f"- SHAP: Available (KernelExplainer - may be slow)")
+            report_lines.append("")
+    
     # Notes
     report_lines.append("## Notes")
     report_lines.append("- This report was generated automatically by the Modeling Lab")
     report_lines.append("- All models were evaluated on the same test set")
     report_lines.append("- Preprocessing was applied consistently across all models")
+    preprocessing_config = st.session_state.get('preprocessing_config', {})
+    if preprocessing_config.get('use_pca') or preprocessing_config.get('use_kmeans_features'):
+        report_lines.append("- Feature engineering steps (PCA/KMeans) were applied as part of preprocessing")
     
     return "\n".join(report_lines)
 
@@ -320,3 +405,12 @@ with col2:
     )
 
 st.success("✅ Report generated successfully!")
+
+# State Debug (Advanced)
+with st.expander("🔧 Advanced / State Debug", expanded=False):
+    st.markdown("**Current State:**")
+    st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
+    st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
+    st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
+    st.write(f"• Trained models: {len(trained_models)}")
+    st.write(f"• Report data: {'Available' if st.session_state.get('report_data') else 'Not generated'}")

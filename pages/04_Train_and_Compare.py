@@ -8,22 +8,28 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from typing import Dict, List, Optional, Any
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit, GroupKFold
 import logging
 
 from utils.session_state import (
     init_session_state, get_data, get_preprocessing_pipeline,
-    DataConfig, SplitConfig, ModelConfig, set_splits, add_trained_model
+    DataConfig, SplitConfig, ModelConfig, set_splits, add_trained_model,
+    TaskTypeDetection, CohortStructureDetection
 )
 from utils.seed import set_global_seed, get_global_seed
+from utils.storyline import render_progress_indicator, get_insights_by_category
 from models.nn_whuber import NNWeightedHuberWrapper
 from models.glm import GLMWrapper
 from models.huber_glm import HuberGLMWrapper
 from models.rf import RFWrapper
+from models.registry_wrappers import RegistryModelWrapper
+from ml.model_registry import get_registry
+from sklearn.pipeline import Pipeline as SklearnPipeline
 from ml.eval import (
     calculate_regression_metrics, calculate_classification_metrics,
     perform_cross_validation, analyze_residuals
 )
+from ml.splits import to_numpy_1d
 try:
     from visualizations import plot_training_history, plot_predictions_vs_actual, plot_residuals
 except ImportError:
@@ -56,6 +62,9 @@ set_global_seed(st.session_state.get('random_seed', 42))
 st.set_page_config(page_title="Train & Compare", page_icon="🏋️", layout="wide")
 st.title("🏋️ Train & Compare Models")
 
+# Progress indicator
+render_progress_indicator("04_Train_and_Compare")
+
 # Global random seed control
 with st.sidebar:
     st.header("⚙️ Global Settings")
@@ -87,28 +96,64 @@ if pipeline is None:
     st.warning("⚠️ Please build preprocessing pipeline first")
     st.stop()
 
+# Get final detection values
+task_type_detection: TaskTypeDetection = st.session_state.get('task_type_detection', TaskTypeDetection())
+cohort_structure_detection: CohortStructureDetection = st.session_state.get('cohort_structure_detection', CohortStructureDetection())
+
+task_type_final = task_type_detection.final if task_type_detection.final else data_config.task_type
+cohort_type_final = cohort_structure_detection.final if cohort_structure_detection.final else 'cross_sectional'
+entity_id_final = cohort_structure_detection.entity_id_final
+
+# Use final task type for downstream logic
+if task_type_final:
+    data_config.task_type = task_type_final
+
 # Split configuration
 st.header("📊 Data Splitting")
+
+# Longitudinal data handling
+use_group_split = False
+if cohort_type_final == 'longitudinal' and entity_id_final:
+    st.info(f"ℹ️ Longitudinal data detected. Entity ID: `{entity_id_final}`. Using group-based splitting to prevent data leakage.")
+    use_group_split = True
+    if entity_id_final not in df.columns:
+        st.error(f"⚠️ Entity ID column '{entity_id_final}' not found in data. Please check Upload & Audit page.")
+        st.stop()
+elif cohort_type_final == 'longitudinal' and not entity_id_final:
+    st.warning("⚠️ Longitudinal data detected but no entity ID column found. Consider selecting an entity ID in Upload & Audit page.")
+    if data_config.datetime_col:
+        st.info("ℹ️ Using time-based split as fallback for longitudinal data.")
 
 # Time-series split option
 use_time_split = False
 if data_config.datetime_col:
+    time_split_default = st.session_state.get('train_use_time_split')
+    if time_split_default is None:
+        time_split_default = (cohort_type_final == 'longitudinal' and not entity_id_final)
     use_time_split = st.checkbox(
         "Use Time-Based Split",
-        value=False,
+        value=time_split_default,
+        disabled=use_group_split,
+        key="train_use_time_split",
         help="Split data chronologically instead of randomly (recommended for time-series)"
     )
-    if not use_time_split:
+    if not use_time_split and not use_group_split:
         st.warning("⚠️ Datetime column detected but random split selected. Consider using time-based split for time-series data.")
 
 col1, col2, col3 = st.columns(3)
 
+# Read split sizes from session_state or use defaults
+split_config_existing = st.session_state.get('split_config')
+train_size_default = int((split_config_existing.train_size * 100) if split_config_existing and split_config_existing.train_size else 70)
+val_size_default = int((split_config_existing.val_size * 100) if split_config_existing and split_config_existing.val_size else 15)
+test_size_default = int((split_config_existing.test_size * 100) if split_config_existing and split_config_existing.test_size else 15)
+
 with col1:
-    train_size = st.slider("Train %", 50, 90, 70) / 100
+    train_size = st.slider("Train %", 50, 90, train_size_default, key="train_split_train_pct") / 100
 with col2:
-    val_size = st.slider("Val %", 5, 30, 15) / 100
+    val_size = st.slider("Val %", 5, 30, val_size_default, key="train_split_val_pct") / 100
 with col3:
-    test_size = st.slider("Test %", 5, 30, 15) / 100
+    test_size = st.slider("Test %", 5, 30, test_size_default, key="train_split_test_pct") / 100
 
 if abs(train_size + val_size + test_size - 1.0) > 0.01:
     st.error("⚠️ Splits must sum to 100%")
@@ -119,16 +164,18 @@ split_config = SplitConfig(
     val_size=val_size,
     test_size=test_size,
     random_state=st.session_state.get('random_seed', 42),
-    stratify=(data_config.task_type == 'classification' and not use_time_split),
+    stratify=(task_type_final == 'classification' and not use_time_split and not use_group_split),
     use_time_split=use_time_split,
     datetime_col=data_config.datetime_col if use_time_split else None
 )
 st.session_state.split_config = split_config
 
-# Cross-validation option
-use_cv = st.checkbox("Enable Cross-Validation", value=False)
+# Cross-validation option - read from session_state
+use_cv_default = st.session_state.get('use_cv', False)
+use_cv = st.checkbox("Enable Cross-Validation", value=use_cv_default, key="train_use_cv")
 if use_cv:
-    cv_folds = st.slider("CV Folds", 3, 10, 5)
+    cv_folds_default = st.session_state.get('cv_folds', 5)
+    cv_folds = st.slider("CV Folds", 3, 10, cv_folds_default, key="train_cv_folds")
     st.session_state.use_cv = True
     st.session_state.cv_folds = cv_folds
 else:
@@ -145,8 +192,33 @@ if st.button("🔄 Prepare Splits", type="primary"):
         if hasattr(X_transformed, 'toarray'):
             X_transformed = X_transformed.toarray()
         
-        # Split data (time-based or random)
-        if split_config.use_time_split and data_config.datetime_col:
+        # Split data (group-based, time-based, or random)
+        if use_group_split and entity_id_final:
+            # Group-based split for longitudinal data
+            groups = to_numpy_1d(df[entity_id_final])
+            y_arr = to_numpy_1d(y)
+            
+            gss = GroupShuffleSplit(n_splits=1, test_size=(val_size + test_size), random_state=split_config.random_state)
+            train_idx, temp_idx = next(gss.split(X_transformed, y_arr, groups))
+            
+            # Split temp into val and test, maintaining groups
+            groups_temp = groups[temp_idx]
+            rel_val = val_size / (val_size + test_size)
+            gss2 = GroupShuffleSplit(n_splits=1, test_size=(1 - rel_val), random_state=split_config.random_state)
+            val_idx, test_idx = next(gss2.split(X_transformed[temp_idx], y_arr[temp_idx], groups_temp))
+            
+            X_train = X_transformed[train_idx]
+            X_val = X_transformed[temp_idx[val_idx]]
+            X_test = X_transformed[temp_idx[test_idx]]
+            y_train = y_arr[train_idx]
+            y_val = y_arr[temp_idx[val_idx]]
+            y_test = y_arr[temp_idx[test_idx]]
+            
+            n_train_groups = len(np.unique(groups[train_idx]))
+            n_val_groups = len(np.unique(groups[temp_idx[val_idx]]))
+            n_test_groups = len(np.unique(groups[temp_idx[test_idx]]))
+            st.info(f"👥 Group-based split: {n_train_groups} train groups, {n_val_groups} val groups, {n_test_groups} test groups")
+        elif split_config.use_time_split and data_config.datetime_col:
             # Time-based split
             df_with_datetime = df.copy()
             df_with_datetime['_temp_index'] = df_with_datetime.index
@@ -164,12 +236,12 @@ if st.button("🔄 Prepare Splits", type="primary"):
             X_train = X_transformed[train_indices]
             X_val = X_transformed[val_indices]
             X_test = X_transformed[test_indices]
-            y_train = y.iloc[train_indices].values
-            y_val = y.iloc[val_indices].values
-            y_test = y.iloc[test_indices].values
+            y_train = to_numpy_1d(y.iloc[train_indices])
+            y_val = to_numpy_1d(y.iloc[val_indices])
+            y_test = to_numpy_1d(y.iloc[test_indices])
             
             st.info(f"⏰ Time-based split: Train={df_with_datetime.iloc[0][data_config.datetime_col]} to {df_with_datetime.iloc[n_train-1][data_config.datetime_col]}")
-        elif split_config.stratify and data_config.task_type == 'classification':
+        elif split_config.stratify and task_type_final == 'classification':
             X_train, X_temp, y_train, y_temp = train_test_split(
                 X_transformed, y, test_size=(val_size + test_size),
                 random_state=split_config.random_state, stratify=y
@@ -194,7 +266,21 @@ if st.button("🔄 Prepare Splits", type="primary"):
         from ml.pipeline import get_feature_names_after_transform
         feature_names = get_feature_names_after_transform(pipeline, data_config.feature_cols)
         
-        set_splits(X_train, X_val, X_test, y_train.values, y_val.values, y_test.values, list(feature_names))
+        set_splits(X_train, X_val, X_test, to_numpy_1d(y_train), to_numpy_1d(y_val), to_numpy_1d(y_test), list(feature_names))
+        
+        # Store indices for explainability (need raw data)
+        if use_group_split and entity_id_final:
+            st.session_state.train_indices = train_idx.tolist() if hasattr(train_idx, 'tolist') else list(train_idx)
+            st.session_state.test_indices = list(temp_idx[test_idx]) if hasattr(test_idx, 'tolist') else temp_idx[test_idx]
+        elif split_config.use_time_split and data_config.datetime_col:
+            st.session_state.train_indices = train_indices.tolist() if hasattr(train_indices, 'tolist') else list(train_indices)
+            st.session_state.test_indices = test_indices.tolist() if hasattr(test_indices, 'tolist') else list(test_indices)
+        else:
+            # For random splits, we don't have original indices easily, so use range
+            # This is a limitation - explainability will need to reconstruct
+            st.session_state.train_indices = None
+            st.session_state.test_indices = None
+        
         st.success(f"✅ Splits prepared: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
     except Exception as e:
         st.error(f"❌ Error preparing splits: {str(e)}")
@@ -212,57 +298,165 @@ y_train = st.session_state.y_train
 y_val = st.session_state.y_val
 y_test = st.session_state.y_test
 
+# Model Selection Coach (top section)
+from ml.model_coach import coach_recommendations
+from ml.eda_recommender import compute_dataset_signals
+
+# Show relevant insights
+insights = get_insights_by_category()
+if insights:
+    with st.expander("💡 Key Insights from EDA", expanded=True):
+        for insight in insights:
+            st.markdown(f"**{insight.get('category', 'General').title()}:** {insight['finding']}")
+            st.caption(f"→ {insight['implication']}")
+
+# Compute signals for coach
+signals = compute_dataset_signals(
+    df, data_config.target_col, task_type_final, cohort_type_final, entity_id_final
+)
+coach_recs = coach_recommendations(
+    signals, 
+    st.session_state.get('eda_results'),
+    get_insights_by_category()
+)
+
+if coach_recs:
+    with st.expander("🎓 Model Selection Coach", expanded=True):
+        st.markdown("**Based on your data, try these models first:**")
+        for idx, rec in enumerate(coach_recs[:3]):  # Top 3
+            with st.container():
+                # Use priority and index to make unique title/keys
+                priority_label = "High" if rec.priority <= 2 else "Medium"
+                st.markdown(f"### {rec.group} Models ({priority_label} Priority)")
+                
+                # Show readiness checks if any
+                if hasattr(rec, 'readiness_checks') and rec.readiness_checks:
+                    st.warning("⚠️ **Recommended prerequisites:**")
+                    for check in rec.readiness_checks:
+                        st.write(f"• {check}")
+                
+                st.markdown("**Why:**")
+                for reason in rec.why:
+                    st.write(f"• {reason}")
+                if rec.when_not_to_use:
+                    st.markdown("**When not to use:**")
+                    for caveat in rec.when_not_to_use:
+                        st.write(f"• {caveat}")
+                if rec.suggested_preprocessing:
+                    st.markdown("**Suggested preprocessing:**")
+                    for prep in rec.suggested_preprocessing:
+                        st.write(f"• {prep}")
+                
+                # Auto-select button with unique key (include priority and index)
+                button_key = f"coach_select_{rec.group}_p{rec.priority}_i{idx}"
+                if st.button(f"Select {rec.group} models", key=button_key):
+                    # Store recommended models in session_state
+                    for model_key in rec.recommended_models:
+                        st.session_state[f'train_model_{model_key}'] = True
+                    st.success(f"✅ Selected {len(rec.recommended_models)} {rec.group} models")
+                    st.rerun()
+
 # Model selection and configuration
 st.header("🤖 Model Configuration")
 
+# Get registry and filter by task type
+registry = get_registry()
+available_models = {
+    k: v for k, v in registry.items()
+    if (task_type_final == 'regression' and v.capabilities.supports_regression) or
+       (task_type_final == 'classification' and v.capabilities.supports_classification)
+}
+
+# Group models by group
+model_groups = {}
+for key, spec in available_models.items():
+    group = spec.group
+    if group not in model_groups:
+        model_groups[group] = []
+    model_groups[group].append((key, spec))
+
+# Advanced models toggle
+show_advanced = st.checkbox("Show Advanced Models", value=st.session_state.get('show_advanced_models', False), key="show_advanced_models")
+advanced_groups = ['Margin', 'Probabilistic']  # SVM, Naive Bayes, LDA
+
 model_config = ModelConfig()
 models_to_train = []
+selected_model_params = {}
 
-col1, col2 = st.columns(2)
-
-with col1:
-    train_nn = st.checkbox("Neural Network", value=True)
-    if train_nn:
-        if data_config.task_type == 'classification':
-            st.info("ℹ️ Neural Network supports classification (BCE/CrossEntropy loss)")
-        with st.expander("NN Hyperparameters"):
-            model_config.nn_epochs = st.number_input("Epochs", 50, 500, 200, key="nn_epochs")
-            model_config.nn_batch_size = st.number_input("Batch Size", 32, 512, 256, key="nn_batch")
-            model_config.nn_lr = st.number_input("Learning Rate", 1e-5, 1e-2, 0.0015, format="%.4f", key="nn_lr")
-            model_config.nn_weight_decay = st.number_input("Weight Decay", 0.0, 1e-2, 0.0002, format="%.4f", key="nn_wd")
-            model_config.nn_patience = st.number_input("Early Stopping Patience", 5, 50, 30, key="nn_patience")
-            model_config.nn_dropout = st.number_input("Dropout", 0.0, 0.5, 0.1, format="%.2f", key="nn_dropout")
-        models_to_train.append('nn')
-
-    train_rf = st.checkbox("Random Forest", value=True)
-    if train_rf:
-        with st.expander("RF Hyperparameters"):
-            model_config.rf_n_estimators = st.number_input("N Estimators", 50, 1000, 500, key="rf_n_est")
-            model_config.rf_max_depth = st.number_input("Max Depth", 1, 50, None, help="None = unlimited", key="rf_depth")
-            model_config.rf_min_samples_leaf = st.number_input("Min Samples Leaf", 1, 20, 10, key="rf_leaf")
-        models_to_train.append('rf')
-
-with col2:
-    train_glm = st.checkbox("GLM (OLS)" if data_config.task_type == 'regression' else "GLM (Logistic)", value=True)
-    if train_glm:
-        models_to_train.append('glm')
-
-    train_huber = st.checkbox("GLM (Huber)", value=(data_config.task_type == 'regression'))
-    if train_huber:
-        if data_config.task_type == 'classification':
-            st.warning("⚠️ Huber regression is for regression tasks only. Not suitable for classification.")
-            train_huber = False
-        else:
-            with st.expander("Huber Hyperparameters"):
-                model_config.huber_epsilon = st.number_input("Epsilon", 1.0, 2.0, 1.35, format="%.2f", key="huber_eps")
-                model_config.huber_alpha = st.number_input("Alpha", 0.0, 1.0, 0.0, format="%.3f", key="huber_alpha")
-            if train_huber:
-                models_to_train.append('huber')
+# Display models by group
+for group_name in sorted(model_groups.keys()):
+    if group_name in advanced_groups and not show_advanced:
+        continue
+    
+    st.subheader(f"{group_name} Models")
+    group_models = model_groups[group_name]
+    
+    for model_key, spec in group_models:
+        # Check if model is selected
+        checkbox_key = f"train_model_{model_key}"
+        is_selected = st.checkbox(
+            spec.name,
+            value=st.session_state.get(checkbox_key, False),
+            key=checkbox_key,
+            help=", ".join(spec.capabilities.notes) if spec.capabilities.notes else None
+        )
+        
+        if is_selected:
+            models_to_train.append(model_key)
+            
+            # Hyperparameter controls
+            if spec.hyperparam_schema:
+                with st.expander(f"{spec.name} Hyperparameters"):
+                    params = {}
+                    for param_name, param_def in spec.hyperparam_schema.items():
+                        param_key = f"{model_key}_{param_name}"
+                        if param_def['type'] == 'int':
+                            params[param_name] = st.number_input(
+                                param_def.get('help', param_name),
+                                min_value=param_def['min'],
+                                max_value=param_def['max'],
+                                value=param_def['default'],
+                                key=param_key
+                            )
+                        elif param_def['type'] == 'float':
+                            format_str = "%.4f" if param_def.get('log', False) else "%.2f"
+                            params[param_name] = st.number_input(
+                                param_def.get('help', param_name),
+                                min_value=param_def['min'],
+                                max_value=param_def['max'],
+                                value=param_def['default'],
+                                format=format_str,
+                                key=param_key
+                            )
+                        elif param_def['type'] == 'select':
+                            options = param_def['options']
+                            default_idx = options.index(param_def['default'])
+                            params[param_name] = st.selectbox(
+                                param_def.get('help', param_name),
+                                options=options,
+                                index=default_idx,
+                                key=param_key
+                            )
+                        elif param_def['type'] == 'int_or_none':
+                            # Special handling for max_depth=None
+                            use_none = st.checkbox(f"{param_name} = None (unlimited)", value=param_def['default'] is None, key=f"{param_key}_none")
+                            if use_none:
+                                params[param_name] = None
+                            else:
+                                params[param_name] = st.number_input(
+                                    param_def.get('help', param_name),
+                                    min_value=param_def['min'],
+                                    max_value=param_def['max'],
+                                    value=param_def['min'] if param_def['default'] is None else param_def['default'],
+                                    key=param_key
+                                )
+                    
+                    selected_model_params[model_key] = params
 
 st.session_state.model_config = model_config
 
 # Training
-if st.button("🚀 Train Models", type="primary") and models_to_train:
+if st.button("🚀 Train Models", type="primary", key="train_models_button") and models_to_train:
     progress_container = st.container()
     
     for model_name in models_to_train:
@@ -272,55 +466,85 @@ if st.button("🚀 Train Models", type="primary") and models_to_train:
             status_text = st.empty()
             
             try:
-                # Create model wrapper
+                # Get model spec from registry
+                spec = registry.get(model_name)
+                
+                # Handle existing wrappers (nn, rf, glm, huber) with special logic
                 if model_name == 'nn':
+                    params = selected_model_params.get(model_name, {})
                     model = NNWeightedHuberWrapper(
-                        dropout=model_config.nn_dropout,
-                        task_type=data_config.task_type
+                        dropout=params.get('dropout', model_config.nn_dropout),
+                        task_type=task_type_final
                     )
                     def progress_cb(epoch, train_loss, val_loss, val_metric):
-                        progress = epoch / model_config.nn_epochs
+                        epochs = params.get('epochs', model_config.nn_epochs)
+                        progress = epoch / epochs
                         progress_bar.progress(progress)
-                        if data_config.task_type == 'regression':
-                            status_text.text(f"Epoch {epoch}/{model_config.nn_epochs} | Loss: {train_loss:.4f} | Val RMSE: {val_metric:.4f}")
+                        if task_type_final == 'regression':
+                            status_text.text(f"Epoch {epoch}/{epochs} | Loss: {train_loss:.4f} | Val RMSE: {val_metric:.4f}")
                         else:
-                            status_text.text(f"Epoch {epoch}/{model_config.nn_epochs} | Loss: {train_loss:.4f} | Val Accuracy: {val_metric:.4f}")
+                            status_text.text(f"Epoch {epoch}/{epochs} | Loss: {train_loss:.4f} | Val Accuracy: {val_metric:.4f}")
                     
                     results = model.fit(
                         X_train, y_train, X_val, y_val,
-                        epochs=model_config.nn_epochs,
-                        batch_size=model_config.nn_batch_size,
-                        lr=model_config.nn_lr,
-                        weight_decay=model_config.nn_weight_decay,
-                        patience=model_config.nn_patience,
+                        epochs=params.get('epochs', model_config.nn_epochs),
+                        batch_size=params.get('batch_size', model_config.nn_batch_size),
+                        lr=params.get('lr', model_config.nn_lr),
+                        weight_decay=params.get('weight_decay', model_config.nn_weight_decay),
+                        patience=params.get('patience', model_config.nn_patience),
                         progress_callback=progress_cb,
                         random_seed=st.session_state.get('random_seed', 42)
                     )
                 
                 elif model_name == 'rf':
+                    params = selected_model_params.get(model_name, {})
                     model = RFWrapper(
-                        n_estimators=model_config.rf_n_estimators,
-                        max_depth=model_config.rf_max_depth,
-                        min_samples_leaf=model_config.rf_min_samples_leaf,
-                        task_type=data_config.task_type
+                        n_estimators=params.get('n_estimators', model_config.rf_n_estimators),
+                        max_depth=params.get('max_depth', model_config.rf_max_depth),
+                        min_samples_leaf=params.get('min_samples_leaf', model_config.rf_min_samples_leaf),
+                        task_type=task_type_final
                     )
                     results = model.fit(X_train, y_train, X_val, y_val)
                 
                 elif model_name == 'glm':
-                    model = GLMWrapper(task_type=data_config.task_type)
+                    model = GLMWrapper(task_type=task_type_final)
                     results = model.fit(X_train, y_train, X_val, y_val)
                 
                 elif model_name == 'huber':
+                    params = selected_model_params.get(model_name, {})
                     model = HuberGLMWrapper(
-                        epsilon=model_config.huber_epsilon,
-                        alpha=model_config.huber_alpha
+                        epsilon=params.get('epsilon', model_config.huber_epsilon),
+                        alpha=params.get('alpha', model_config.huber_alpha)
                     )
+                    results = model.fit(X_train, y_train, X_val, y_val)
+                
+                else:
+                    # New registry models: create estimator and wrap
+                    if spec is None:
+                        st.error(f"Model spec not found for {model_name}")
+                        continue
+                    
+                    params = selected_model_params.get(model_name, spec.default_params)
+                    random_seed = st.session_state.get('random_seed', 42)
+                    
+                    # Create estimator from factory
+                    estimator = spec.factory(task_type_final, random_seed)
+                    
+                    # Set hyperparameters
+                    for param_name, param_value in params.items():
+                        if hasattr(estimator, param_name):
+                            setattr(estimator, param_name, param_value)
+                    
+                    # Wrap in generic wrapper
+                    model = RegistryModelWrapper(estimator, spec.name)
+                    
+                    # Fit model
                     results = model.fit(X_train, y_train, X_val, y_val)
                 
                 # Evaluate on test set
                 y_test_pred = model.predict(X_test)
                 
-                if data_config.task_type == 'regression':
+                if task_type_final == 'regression':
                     test_metrics = calculate_regression_metrics(y_test, y_test_pred)
                 else:
                     y_test_proba = model.predict_proba(X_test) if model.supports_proba() else None
@@ -351,33 +575,64 @@ if st.button("🚀 Train Models", type="primary") and models_to_train:
                 
                 add_trained_model(model_name, model, model_results)
                 
-                # Store fitted sklearn-compatible estimator for explainability
-                # For NN, store the sklearn-compatible wrapper
-                # For others, store the model itself (already sklearn-compatible)
+                # Store fitted estimator for explainability
+                # For explainability, we need a pipeline that can handle raw data
+                # Store both the fitted model and the preprocessing pipeline
                 if model_name == 'nn':
+                    # NN needs special handling - store sklearn-compatible wrapper
                     fitted_estimator = model.get_sklearn_estimator()
-                    # Ensure it's marked as fitted with correct attributes
-                    # Use actual training data to set attributes properly
                     if not hasattr(fitted_estimator, 'is_fitted_') or not fitted_estimator.is_fitted_:
                         fitted_estimator.fit(X_train[:1], y_train[:1])
                     st.session_state.fitted_estimators[model_name] = fitted_estimator
                 else:
-                    # For sklearn models, store the model directly
-                    # sklearn models are already fitted after model.fit() call above
-                    # They don't have is_fitted_ but sklearn's check_is_fitted will work
+                    # For sklearn models, store the fitted model
                     sklearn_model = model.get_model()
                     st.session_state.fitted_estimators[model_name] = sklearn_model
+                
+                # Store preprocessing pipeline for all models (needed for explainability)
+                st.session_state.fitted_preprocessing_pipelines[model_name] = pipeline
                 
                 progress_bar.progress(1.0)
                 st.success(f"✅ {model_name.upper()} training complete!")
                 
             except Exception as e:
-                st.error(f"❌ Error training {model_name}: {str(e)}")
-                logger.exception(e)
+                with st.expander(f"❌ Error training {model_name.upper()}", expanded=True):
+                    st.error(f"Training failed: {str(e)}")
+                    st.code(str(e), language='python')
+                    logger.exception(e)
 
 # Results comparison
 if st.session_state.get('trained_models'):
     st.header("📊 Results Comparison")
+    
+    # How to read results explainer
+    with st.expander("📚 How to Read These Results", expanded=False):
+        if task_type_final == 'regression':
+            st.markdown("""
+            **Metrics:**
+            - **RMSE (Root Mean Squared Error):** Average prediction error in target units. Lower is better.
+            - **MAE (Mean Absolute Error):** Average absolute error. Less sensitive to outliers than RMSE.
+            - **R² (R-squared):** Proportion of variance explained. 1.0 = perfect, 0 = no better than mean.
+            - **MedianAE:** Median absolute error. Robust to outliers.
+            
+            **Cross-Validation vs Holdout:**
+            - **Holdout:** Single train/test split. Fast but may be noisy.
+            - **Cross-Validation:** Multiple splits. More stable estimate but slower.
+            """)
+        else:
+            st.markdown("""
+            **Metrics:**
+            - **Accuracy:** Proportion of correct predictions. Can be misleading with class imbalance.
+            - **F1 Score:** Harmonic mean of precision and recall. Better for imbalanced data.
+            - **ROC-AUC:** Area under ROC curve. Measures separability of classes.
+            - **PR-AUC:** Precision-Recall AUC. Better for imbalanced data than ROC-AUC.
+            - **Log Loss:** Penalizes confident wrong predictions. Lower is better.
+            
+            **Calibration:**
+            - Well-calibrated models: predicted probabilities match actual frequencies
+            - Important for medical decision-making
+            - Check calibration plots if available
+            """)
     
     # Metrics table
     comparison_data = []

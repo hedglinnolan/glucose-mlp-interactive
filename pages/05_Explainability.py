@@ -14,7 +14,10 @@ import logging
 from utils.session_state import (
     init_session_state, get_preprocessing_pipeline, DataConfig
 )
+from utils.storyline import render_progress_indicator
 from ml.estimator_utils import is_estimator_fitted
+from ml.model_registry import get_registry
+from sklearn.pipeline import Pipeline as SklearnPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,9 @@ init_session_state()
 
 st.set_page_config(page_title="Explainability", page_icon="🔍", layout="wide")
 st.title("🔍 Model Explainability")
+
+# Progress indicator
+render_progress_indicator("05_Explainability")
 
 # Check prerequisites
 if not st.session_state.get('trained_models'):
@@ -40,10 +46,29 @@ if X_test is None or y_test is None:
     st.info("**Next steps:** Go to Train & Compare page and click 'Prepare Splits'.")
     st.stop()
 
+# Get registry for capability checks
+registry = get_registry()
+
 # Permutation Importance
 st.header("🎯 Permutation Importance")
+with st.expander("📚 What is Permutation Importance?", expanded=False):
+    st.markdown("""
+    **Definition:** Permutation importance measures how much model performance degrades when a feature's values are randomly shuffled.
+    
+    **How it works:**
+    1. Calculate baseline model performance
+    2. Shuffle one feature's values
+    3. Recalculate performance
+    4. Importance = baseline - shuffled performance
+    
+    **When it can mislead:**
+    - Correlated features: shuffling one may not hurt if another is similar
+    - Non-linear interactions: may underestimate importance of features that work together
+    - Extrapolation: if shuffled values are outside training range, predictions may be unreliable
+    """)
+st.info("Available for all models with `predict` method.")
 
-if st.button("Calculate Permutation Importance"):
+if st.button("Calculate Permutation Importance", key="explain_perm_importance_button"):
     perm_errors = []
     for name, model_wrapper in st.session_state.trained_models.items():
         try:
@@ -60,10 +85,42 @@ if st.button("Calculate Permutation Importance"):
                 perm_errors.append(f"{name}: Estimator not marked as fitted")
                 continue
             
+            # Check if model supports permutation importance (all models with predict should)
+            # Create full pipeline if preprocessing pipeline exists
+            if name in st.session_state.get('fitted_preprocessing_pipelines', {}):
+                prep_pipeline = st.session_state.fitted_preprocessing_pipelines[name]
+                # Create full pipeline for explainability
+                full_pipeline = SklearnPipeline([
+                    ('preprocess', prep_pipeline),
+                    ('model', estimator)
+                ])
+                # Get raw test data for explainability
+                df_raw = st.session_state.get('raw_data')
+                test_indices = st.session_state.get('test_indices')
+                if df_raw is not None and data_config and test_indices is not None:
+                    try:
+                        X_test_raw = df_raw[data_config.feature_cols].iloc[test_indices]
+                        y_test_for_perm = df_raw[data_config.target_col].iloc[test_indices].values
+                    except:
+                        # Fallback to preprocessed data
+                        full_pipeline = estimator
+                        X_test_raw = X_test
+                        y_test_for_perm = y_test
+                else:
+                    # Fallback to preprocessed data
+                    full_pipeline = estimator
+                    X_test_raw = X_test
+                    y_test_for_perm = y_test
+            else:
+                # No preprocessing pipeline, use estimator directly
+                full_pipeline = estimator
+                X_test_raw = X_test
+                y_test_for_perm = y_test
+            
             with st.spinner(f"Calculating permutation importance for {name.upper()} (this may take a while)..."):
                 # Calculate permutation importance
                 perm_importance = permutation_importance(
-                    estimator, X_test, y_test,
+                    full_pipeline, X_test_raw, y_test_for_perm,
                     n_repeats=10,
                     random_state=42,
                     n_jobs=-1
@@ -119,6 +176,22 @@ if st.session_state.get('permutation_importance'):
 
 # Partial Dependence
 st.header("📈 Partial Dependence Plots")
+with st.expander("📚 What is Partial Dependence?", expanded=False):
+    st.markdown("""
+    **Definition:** Partial dependence shows how a feature affects predictions, averaged over all other features.
+    
+    **How it works:**
+    1. Fix one feature at a specific value
+    2. Average predictions over all other features
+    3. Repeat for different values of the fixed feature
+    4. Plot the average prediction vs feature value
+    
+    **When it can mislead:**
+    - Extrapolation: if feature values are outside training range, predictions may be unreliable
+    - Correlated features: assumes independence, may not reflect real-world interactions
+    - Only shows average effect, not individual variation
+    """)
+st.info("Available for models with `predict` or `predict_proba` methods.")
 
 if st.button("Calculate Partial Dependence"):
     # Get original feature names (pre-transform) for PD
@@ -127,6 +200,12 @@ if st.button("Calculate Partial Dependence"):
     pd_errors = []
     for name, model_wrapper in st.session_state.trained_models.items():
         try:
+            # Check capability from registry
+            spec = registry.get(name)
+            if spec and not spec.capabilities.supports_partial_dependence:
+                pd_errors.append(f"{name}: Partial dependence not supported for this model type")
+                continue
+            
             # Get the fitted sklearn-compatible estimator from session_state
             if name not in st.session_state.get('fitted_estimators', {}):
                 pd_errors.append(f"{name}: Fitted estimator not found in session_state. Please retrain the model.")
@@ -139,6 +218,29 @@ if st.button("Calculate Partial Dependence"):
             if not is_estimator_fitted(estimator):
                 pd_errors.append(f"{name}: Estimator not marked as fitted")
                 continue
+            
+            # Create full pipeline if preprocessing exists
+            if name in st.session_state.get('fitted_preprocessing_pipelines', {}):
+                prep_pipeline = st.session_state.fitted_preprocessing_pipelines[name]
+                full_pipeline = SklearnPipeline([
+                    ('preprocess', prep_pipeline),
+                    ('model', estimator)
+                ])
+                # Get raw test data for explainability
+                df_raw = st.session_state.get('raw_data')
+                test_indices = st.session_state.get('test_indices')
+                if df_raw is not None and data_config and test_indices is not None:
+                    try:
+                        X_test_raw = df_raw[data_config.feature_cols].iloc[test_indices]
+                    except:
+                        full_pipeline = estimator
+                        X_test_raw = X_test
+                else:
+                    full_pipeline = estimator
+                    X_test_raw = X_test
+            else:
+                full_pipeline = estimator
+                X_test_raw = X_test
             
             with st.spinner(f"Calculating partial dependence for {name.upper()}..."):
                 # Get top features from permutation importance if available
@@ -171,12 +273,12 @@ if st.button("Calculate Partial Dependence"):
                                 continue
                         
                         # Use a sample for faster computation (handle sparse)
-                        X_sample_pd = X_test[:min(500, len(X_test))]
+                        X_sample_pd = X_test_raw[:min(500, len(X_test_raw))]
                         if hasattr(X_sample_pd, 'toarray'):
                             X_sample_pd = X_sample_pd.toarray()
                         
                         pd_result = partial_dependence(
-                            estimator, X_sample_pd, features=[feat_idx],
+                            full_pipeline, X_sample_pd, features=[feat_idx],
                             grid_resolution=20
                         )
                         pd_results[feat_name] = {
@@ -243,8 +345,32 @@ if st.session_state.get('partial_dependence'):
 
 # SHAP (Advanced)
 st.header("🔬 SHAP Analysis (Advanced)")
+with st.expander("📚 What is SHAP?", expanded=False):
+    st.markdown("""
+    **Definition:** SHAP (SHapley Additive exPlanations) provides feature-level explanations based on game theory.
+    
+    **How it works:**
+    - Each feature gets a "contribution" to each prediction
+    - Contributions sum to the difference between prediction and baseline
+    - Based on Shapley values from cooperative game theory
+    
+    **Explainer types:**
+    - **TreeExplainer:** Fast and exact for tree models (RF, ExtraTrees, HistGB)
+    - **LinearExplainer:** Fast for linear models (Ridge, Lasso, Logistic)
+    - **KernelExplainer:** Slow but works for any model (uses sampling)
+    
+    **When it can mislead:**
+    - KernelExplainer uses sampling - may be slow or inaccurate with many features
+    - Assumes feature independence (like permutation importance)
+    - Values depend on background data distribution
+    """)
+st.info("Availability depends on model type: TreeExplainer for tree models, LinearExplainer for linear models, KernelExplainer for others (slower).")
 
-use_shap = st.checkbox("Enable SHAP (requires shap package)", value=False, key="shap_enable")
+use_shap = st.checkbox(
+    "Enable SHAP (requires shap package)", 
+    value=st.session_state.get('explain_shap_enable', False), 
+    key="explain_shap_enable"
+)
 
 if use_shap:
     try:
@@ -273,6 +399,16 @@ if use_shap:
         for name, model_wrapper in st.session_state.trained_models.items():
             st.subheader(f"{name.upper()} - SHAP Values")
             
+            # Check SHAP capability from registry
+            spec = registry.get(name)
+            if spec:
+                shap_support = spec.capabilities.supports_shap
+                if shap_support == 'none':
+                    st.warning(f"⚠️ {name.upper()}: SHAP not supported for this model type (capability: {shap_support})")
+                    continue
+                elif shap_support == 'kernel':
+                    st.info(f"ℹ️ {name.upper()}: Using KernelExplainer (may be slow for large datasets)")
+            
             # Get the fitted sklearn-compatible estimator from session_state
             if name not in st.session_state.get('fitted_estimators', {}):
                 st.warning(f"⚠️ {name.upper()} fitted estimator not found. Please retrain the model.")
@@ -286,11 +422,34 @@ if use_shap:
                 st.warning(f"⚠️ {name.upper()} estimator not marked as fitted. Skipping SHAP.")
                 continue
             
+            # Create full pipeline if preprocessing exists
+            if name in st.session_state.get('fitted_preprocessing_pipelines', {}):
+                prep_pipeline = st.session_state.fitted_preprocessing_pipelines[name]
+                full_pipeline = SklearnPipeline([
+                    ('preprocess', prep_pipeline),
+                    ('model', estimator)
+                ])
+                # Get raw test data for explainability
+                df_raw = st.session_state.get('raw_data')
+                test_indices = st.session_state.get('test_indices')
+                if df_raw is not None and data_config and test_indices is not None:
+                    try:
+                        X_test_raw = df_raw[data_config.feature_cols].iloc[test_indices]
+                    except:
+                        full_pipeline = estimator
+                        X_test_raw = X_test
+                else:
+                    full_pipeline = estimator
+                    X_test_raw = X_test
+            else:
+                full_pipeline = estimator
+                X_test_raw = X_test
+            
             try:
                 
-                # Prepare samples
-                X_background = X_test[:min(background_size, len(X_test))]
-                X_eval = X_test[:min(eval_size, len(X_test))]
+                # Prepare samples (use raw data for full pipeline)
+                X_background = X_test_raw[:min(background_size, len(X_test_raw))]
+                X_eval = X_test_raw[:min(eval_size, len(X_test_raw))]
                 
                 # Handle sparse matrices
                 if hasattr(X_background, 'toarray'):
@@ -306,22 +465,33 @@ if use_shap:
                 status_text.text("Preparing SHAP explainer...")
                 progress_bar.progress(0.2)
                 
-                # Determine explainer type
-                if hasattr(estimator, 'tree_') or (hasattr(model_wrapper, 'model') and hasattr(model_wrapper.model, 'tree_')):
-                    # Tree-based model
-                    explainer = shap.TreeExplainer(estimator)
+                # Determine explainer type based on capability
+                if spec and spec.capabilities.supports_shap == 'tree':
+                    # Tree-based model - use TreeExplainer
+                    explainer = shap.TreeExplainer(full_pipeline.named_steps['model'] if isinstance(full_pipeline, SklearnPipeline) else full_pipeline)
                     status_text.text("Computing SHAP values (TreeExplainer)...")
+                    progress_bar.progress(0.5)
+                    shap_values = explainer.shap_values(X_eval)
+                    progress_bar.progress(0.8)
+                elif spec and spec.capabilities.supports_shap == 'linear':
+                    # Linear model - use LinearExplainer
+                    explainer = shap.LinearExplainer(
+                        full_pipeline.named_steps['model'] if isinstance(full_pipeline, SklearnPipeline) else full_pipeline,
+                        X_background
+                    )
+                    status_text.text("Computing SHAP values (LinearExplainer)...")
                     progress_bar.progress(0.5)
                     shap_values = explainer.shap_values(X_eval)
                     progress_bar.progress(0.8)
                 else:
                     # Kernel or other explainer
-                    if data_config.task_type == 'classification' and hasattr(estimator, 'predict_proba'):
+                    task_type = data_config.task_type if data_config else 'regression'
+                    if task_type == 'classification' and hasattr(full_pipeline, 'predict_proba'):
                         # Use predict_proba for classification
                         status_text.text("Preparing background data for KernelExplainer...")
                         progress_bar.progress(0.3)
                         explainer = shap.KernelExplainer(
-                            estimator.predict_proba,
+                            full_pipeline.predict_proba,
                             X_background[:min(50, len(X_background))]
                         )
                         status_text.text("Computing SHAP values (this may take a while)...")
@@ -331,7 +501,7 @@ if use_shap:
                     else:
                         # Regression or model without predict_proba
                         explainer = shap.KernelExplainer(
-                            estimator.predict,
+                            full_pipeline.predict,
                             X_background[:min(50, len(X_background))]
                         )
                         status_text.text("Computing SHAP values (this may take a while)...")
@@ -411,3 +581,17 @@ if use_shap:
     except Exception as e:
         st.error(f"❌ Error setting up SHAP: {str(e)}")
         logger.exception(e)
+
+# State Debug (Advanced)
+with st.expander("🔧 Advanced / State Debug", expanded=False):
+    st.markdown("**Current State:**")
+    st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
+    st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
+    st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
+    task_det = st.session_state.get('task_type_detection')
+    cohort_det = st.session_state.get('cohort_structure_detection')
+    st.write(f"• Task type (final): {task_det.final if task_det else 'None'}")
+    st.write(f"• Cohort type (final): {cohort_det.final if cohort_det else 'None'}")
+    st.write(f"• Trained models: {len(st.session_state.get('trained_models', {}))}")
+    st.write(f"• Permutation importance: {len(st.session_state.get('permutation_importance', {}))}")
+    st.write(f"• Partial dependence: {len(st.session_state.get('partial_dependence', {}))}")

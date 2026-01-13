@@ -2,7 +2,7 @@
 Preprocessing pipeline builder.
 Creates sklearn Pipeline with ColumnTransformer for mixed data types.
 """
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import pandas as pd
 import numpy as np
 from sklearn.pipeline import Pipeline
@@ -10,6 +10,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, RobustScaler, OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer
+from ml.feature_steps import create_pca_step, KMeansFeatures
 
 
 def build_preprocessing_pipeline(
@@ -20,7 +21,16 @@ def build_preprocessing_pipeline(
     numeric_log_transform: bool = False,
     categorical_imputation: str = 'most_frequent',  # 'most_frequent', 'constant'
     categorical_encoding: str = 'onehot',  # 'onehot', 'target' (if enabled)
-    handle_unknown: str = 'ignore'  # For one-hot encoding
+    handle_unknown: str = 'ignore',  # For one-hot encoding
+    # Optional feature engineering steps
+    use_kmeans_features: bool = False,
+    kmeans_n_clusters: int = 5,
+    kmeans_add_distances: bool = True,
+    kmeans_add_onehot: bool = False,
+    use_pca: bool = False,
+    pca_n_components: Optional[Union[int, float]] = None,
+    pca_whiten: bool = False,
+    random_state: int = 42
 ) -> Pipeline:
     """
     Build preprocessing pipeline using ColumnTransformer.
@@ -98,10 +108,34 @@ def build_preprocessing_pipeline(
         verbose_feature_names_out=False
     )
     
-    # Wrap in Pipeline (allows for future steps)
-    pipeline = Pipeline([('preprocessor', preprocessor)])
+    # Build pipeline steps
+    steps = [('preprocessor', preprocessor)]
     
-    return pipeline
+    # Optional: KMeansFeatures (must come before PCA if both enabled)
+    if use_kmeans_features:
+        kmeans_transformer = KMeansFeatures(
+            n_clusters=kmeans_n_clusters,
+            add_distances=kmeans_add_distances,
+            add_onehot_label=kmeans_add_onehot,
+            random_state=random_state
+        )
+        steps.append(('kmeans_features', kmeans_transformer))
+    
+    # Optional: PCA (dimensionality reduction)
+    # Note: PCA n_components validation will happen at fit time
+    # We can't know exact feature count until after ColumnTransformer + KMeans
+    # So we'll validate in the create_pca_step or handle gracefully
+    if use_pca:
+        pca_transformer = create_pca_step(
+            enabled=True,
+            n_components=pca_n_components,
+            whiten=pca_whiten,
+            random_state=random_state
+        )
+        if pca_transformer:
+            steps.append(('pca', pca_transformer))
+    
+    return Pipeline(steps)
 
 
 def get_pipeline_recipe(pipeline: Pipeline) -> str:
@@ -151,6 +185,26 @@ def get_pipeline_recipe(pipeline: Pipeline) -> str:
                             step_parts.append("One-hot encoding (sparse)")
                 step_desc += " → ".join(step_parts) if step_parts else "No transformation"
                 steps.append(step_desc)
+    
+    # Add optional feature engineering steps
+    if 'kmeans_features' in pipeline.named_steps:
+        kmeans = pipeline.named_steps['kmeans_features']
+        kmeans_desc = f"KMeans Features: {kmeans.n_clusters} clusters"
+        if kmeans.add_distances:
+            kmeans_desc += ", distances"
+        if kmeans.add_onehot_label:
+            kmeans_desc += ", one-hot labels"
+        steps.append(kmeans_desc)
+    
+    if 'pca' in pipeline.named_steps:
+        pca = pipeline.named_steps['pca']
+        n_comp = pca.n_components_
+        if isinstance(n_comp, (int, np.integer)):
+            steps.append(f"PCA: {n_comp} components")
+        else:
+            steps.append(f"PCA: {n_comp} components (variance threshold)")
+        if pca.whiten:
+            steps[-1] += ", whitened"
     
     return "\n".join(steps) if steps else "No preprocessing steps"
 

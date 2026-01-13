@@ -8,10 +8,17 @@ import numpy as np
 from typing import Dict, List, Tuple
 import logging
 
-from utils.session_state import init_session_state, set_data, get_data, DataConfig
+from utils.session_state import (
+    init_session_state, set_data, get_data, DataConfig,
+    TaskTypeDetection, CohortStructureDetection
+)
 from utils.datasets import get_builtin_datasets
 from utils.reconcile import reconcile_target_features
+from utils.state_reconcile import reconcile_state_with_df
+from utils.storyline import render_progress_indicator
 from data_processor import load_and_preview_csv, get_numeric_columns
+from ml.triage import detect_task_type, detect_cohort_structure
+from ml.eda_recommender import compute_dataset_signals
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +32,9 @@ st.set_page_config(
 )
 
 st.title("📁 Upload & Data Audit")
+
+# Progress indicator
+render_progress_indicator("01_Upload_and_Audit")
 
 # Built-in datasets
 st.header("📚 Built-in Datasets (for Testing)")
@@ -57,6 +67,8 @@ if selected_dataset != 'None (Upload CSV)':
             df_builtin = generator(random_state=st.session_state.get('random_seed', 42))
             set_data(df_builtin)
             st.session_state.data_source = f"Built-in: {selected_dataset}"
+            # Reconcile state with new data
+            reconcile_state_with_df(df_builtin, st.session_state)
             st.success(f"✅ Generated {len(df_builtin)} rows")
             st.rerun()
 
@@ -90,6 +102,8 @@ if uploaded_file is not None:
                 df = load_and_preview_csv(uploaded_file)
                 set_data(df)
                 st.session_state.data_source = "Uploaded CSV"
+                # Reconcile state with new data
+                reconcile_state_with_df(df, st.session_state)
                 st.success(f"✅ Loaded {len(df):,} rows × {len(df.columns)} columns")
                 st.rerun()
         except Exception as e:
@@ -229,6 +243,20 @@ if df is not None:
         # Store audit results
         st.session_state.data_audit = audit_results
         
+        # Run cohort structure detection (once when data is loaded)
+        if 'cohort_structure_detection' not in st.session_state or st.session_state.cohort_structure_detection.detected is None:
+            with st.spinner("Detecting cohort structure..."):
+                cohort_result = detect_cohort_structure(df)
+                cohort_detection = CohortStructureDetection(
+                    detected=cohort_result['detected'],
+                    confidence=cohort_result['confidence'],
+                    reasons=cohort_result['reasons'],
+                    entity_id_candidates=cohort_result['entity_id_candidates'],
+                    entity_id_detected=cohort_result['entity_id_detected'],
+                    time_column_candidates=cohort_result['time_column_candidates']
+                )
+                st.session_state.cohort_structure_detection = cohort_detection
+        
         # Recommendations
         st.header("💡 Recommendations")
         recommendations = []
@@ -287,18 +315,20 @@ if df is not None:
             )
             feature_options = [col for col in numeric_cols if col != target_col_reconciled]
             
-            # Default features: use existing if valid, otherwise first 10
-            feature_defaults = []
-            if existing_features:
+            # Read from session_state if available, otherwise use existing
+            features_from_state = st.session_state.get('upload_features_multiselect')
+            if features_from_state is not None:
+                feature_defaults = [f for f in features_from_state if f in feature_options]
+            elif existing_features:
                 feature_defaults = [f for f in existing_features if f in feature_options]
-            if not feature_defaults:
+            else:
                 feature_defaults = feature_options[:min(10, len(feature_options))]
             
             selected_features = st.multiselect(
                 "Feature Variables",
                 options=feature_options,
                 default=feature_defaults,
-                key="features_multiselect",
+                key="upload_features_multiselect",
                 help="Select columns to use as predictors"
             )
         
@@ -315,7 +345,7 @@ if df is not None:
                 "Datetime Column (Optional, for time-series splits)",
                 options=['None'] + datetime_cols,
                 index=datetime_default_idx,
-                key="datetime_selectbox",
+                key="upload_datetime_selectbox",
                 help="Select if you want time-based splitting"
             )
             if datetime_col == 'None':
@@ -336,68 +366,168 @@ if df is not None:
             if not target_col or not selected_features:
                 st.warning("⚠️ Please select both target and at least one feature")
             else:
-                # Detect task type
-                unique_targets = df[target_col].nunique()
-                is_numeric_int = df[target_col].dtype in [np.int64, np.int32, 'int64', 'int32']
-                auto_task_type = None
-                warning_msg = None
+                # Run task type detection when target is selected/changed
+                task_detection = st.session_state.get('task_type_detection', TaskTypeDetection())
+                should_redetect = (
+                    task_detection.detected is None or
+                    existing_config is None or
+                    existing_config.target_col != target_col
+                )
                 
-                if unique_targets <= 10 and is_numeric_int:
-                    auto_task_type = 'classification'
-                    warning_msg = f"⚠️ Detected {unique_targets} unique values - suggesting Classification. You can override below."
-                else:
-                    auto_task_type = 'regression'
+                if should_redetect:
+                    with st.spinner("Detecting task type..."):
+                        task_result = detect_task_type(df, target_col)
+                        task_detection = TaskTypeDetection(
+                            detected=task_result['detected'],
+                            confidence=task_result['confidence'],
+                            reasons=task_result['reasons']
+                        )
+                        st.session_state.task_type_detection = task_detection
                 
-                # Get existing task type
-                existing_task = existing_config.task_type if existing_config else None
+                # Auto-detection panel
+                st.subheader("🔍 Auto-Detection Results")
                 
-                # Task type override - preserve existing selection
-                st.subheader("Task Type Selection")
-                col1, col2 = st.columns([2, 1])
+                col1, col2 = st.columns(2)
                 
                 with col1:
-                    # Determine default index
-                    task_default_idx = 0
-                    if existing_task == 'classification':
-                        task_default_idx = 2
-                    elif existing_task == 'regression':
-                        task_default_idx = 1
-                    elif auto_task_type == 'classification':
-                        task_default_idx = 0  # Auto-detect will show classification
+                    st.markdown("**Task Type Detection**")
+                    task_det = st.session_state.task_type_detection
+                    if task_det.detected:
+                        confidence_emoji = {"high": "🟢", "med": "🟡", "low": "🟠"}.get(task_det.confidence, "⚪")
+                        st.write(f"{confidence_emoji} Detected: **{task_det.detected.title()}** ({task_det.confidence} confidence)")
+                        with st.expander("Detection reasons"):
+                            for reason in task_det.reasons:
+                                st.write(f"• {reason}")
                     else:
-                        task_default_idx = 0  # Auto-detect will show regression
-                    
-                    task_type_override = st.radio(
-                        "Task Type",
-                        ['Auto-detect', 'Regression', 'Classification'],
-                        index=task_default_idx,
-                        key="task_type_radio",
-                        help="Auto-detect uses heuristics. Override if needed."
-                    )
+                        st.write("⚪ Not detected yet")
                 
                 with col2:
-                    if warning_msg:
-                        st.warning(warning_msg)
+                    st.markdown("**Cohort Structure Detection**")
+                    cohort_det = st.session_state.cohort_structure_detection
+                    if cohort_det.detected:
+                        confidence_emoji = {"high": "🟢", "med": "🟡", "low": "🟠"}.get(cohort_det.confidence, "⚪")
+                        st.write(f"{confidence_emoji} Detected: **{cohort_det.detected.replace('_', ' ').title()}** ({cohort_det.confidence} confidence)")
+                        with st.expander("Detection reasons"):
+                            for reason in cohort_det.reasons:
+                                st.write(f"• {reason}")
+                        if cohort_det.entity_id_detected:
+                            st.write(f"Entity ID: `{cohort_det.entity_id_detected}`")
+                    else:
+                        st.write("⚪ Not detected yet")
                 
-                # Determine final task type
-                if task_type_override == 'Auto-detect':
-                    task_type = auto_task_type
-                elif task_type_override == 'Regression':
-                    task_type = 'regression'
-                else:
-                    task_type = 'classification'
+                # Override controls
+                st.subheader("⚙️ Manual Overrides")
                 
-                # Warn if task type changed and might affect features
-                if existing_task and existing_task != task_type:
-                    if task_type == 'classification' and existing_task == 'regression':
+                # Task type override - read from session_state
+                task_override_enabled = st.checkbox(
+                    "Override task type",
+                    value=st.session_state.get('upload_task_override_checkbox', task_detection.override_enabled),
+                    key="upload_task_override_checkbox",
+                    help="Manually set task type instead of using auto-detection"
+                )
+                
+                task_override_value = None
+                if task_override_enabled:
+                    task_default_idx = 0
+                    if task_detection.override_value == 'regression':
+                        task_default_idx = 0
+                    elif task_detection.override_value == 'classification':
+                        task_default_idx = 1
+                    elif task_detection.detected == 'regression':
+                        task_default_idx = 0
+                    else:
+                        task_default_idx = 1
+                    
+                    task_override_value = st.radio(
+                        "Task type",
+                        ['regression', 'classification'],
+                        index=task_default_idx,
+                        key="upload_task_override_radio",
+                        horizontal=True
+                    )
+                
+                # Update task detection with override
+                task_detection.override_enabled = task_override_enabled
+                task_detection.override_value = task_override_value
+                st.session_state.task_type_detection = task_detection
+                
+                # Cohort type override - read from session_state
+                cohort_override_enabled = st.checkbox(
+                    "Override cohort structure",
+                    value=st.session_state.get('upload_cohort_override_checkbox', cohort_det.override_enabled),
+                    key="upload_cohort_override_checkbox",
+                    help="Manually set cohort structure instead of using auto-detection"
+                )
+                
+                cohort_override_value = None
+                if cohort_override_enabled:
+                    cohort_default_idx = 0
+                    if cohort_det.override_value == 'longitudinal':
+                        cohort_default_idx = 1
+                    elif cohort_det.detected == 'longitudinal':
+                        cohort_default_idx = 1
+                    else:
+                        cohort_default_idx = 0
+                    
+                    cohort_override_value = st.radio(
+                        "Cohort structure",
+                        ['cross_sectional', 'longitudinal'],
+                        index=cohort_default_idx,
+                        key="upload_cohort_override_radio",
+                        horizontal=True,
+                        format_func=lambda x: x.replace('_', ' ').title()
+                    )
+                
+                # Entity ID override - read from session_state
+                entity_override_enabled = st.checkbox(
+                    "Override entity ID column",
+                    value=st.session_state.get('upload_entity_id_override_checkbox', cohort_det.entity_id_override_enabled),
+                    key="upload_entity_id_override_checkbox",
+                    help="Manually select entity ID column for longitudinal data"
+                )
+                
+                entity_override_value = None
+                if entity_override_enabled:
+                    entity_options = ['None'] + (cohort_det.entity_id_candidates or [])
+                    entity_default_idx = 0
+                    if cohort_det.entity_id_override_value:
+                        if cohort_det.entity_id_override_value in entity_options:
+                            entity_default_idx = entity_options.index(cohort_det.entity_id_override_value)
+                    elif cohort_det.entity_id_detected and cohort_det.entity_id_detected in entity_options:
+                        entity_default_idx = entity_options.index(cohort_det.entity_id_detected)
+                    
+                    entity_override_value = st.selectbox(
+                        "Entity ID column",
+                        options=entity_options,
+                        index=entity_default_idx,
+                        key="upload_entity_id_override_selectbox"
+                    )
+                    if entity_override_value == 'None':
+                        entity_override_value = None
+                
+                # Update cohort detection with overrides
+                cohort_det.override_enabled = cohort_override_enabled
+                cohort_det.override_value = cohort_override_value
+                cohort_det.entity_id_override_enabled = entity_override_enabled
+                cohort_det.entity_id_override_value = entity_override_value
+                st.session_state.cohort_structure_detection = cohort_det
+                
+                # Get final values
+                task_type_final = task_detection.final
+                cohort_type_final = cohort_det.final
+                entity_id_final = cohort_det.entity_id_final
+                
+                # Warn if task type changed
+                if existing_config and existing_config.task_type and existing_config.task_type != task_type_final:
+                    if task_type_final == 'classification' and existing_config.task_type == 'regression':
                         st.info("ℹ️ Switched to classification. Ensure target has discrete values.")
             
-            # Store configuration
+            # Store configuration (use final values)
             data_config = DataConfig(
                 target_col=target_col,
                 feature_cols=selected_features,
                 datetime_col=datetime_col,
-                task_type=task_type
+                task_type=task_type_final if target_col and selected_features else None
             )
             st.session_state.data_config = data_config
             
@@ -405,8 +535,62 @@ if df is not None:
             if datetime_col:
                 st.info("ℹ️ Datetime column selected. You can enable time-based splitting in the Train & Compare page.")
             
-            st.success(f"✅ Configuration saved: {task_type.title()} task with {len(selected_features)} features")
-            st.info(f"**Next:** Go to EDA page to explore your data")
+            # Safe getter for task type display
+            task_type_display = task_type_final if task_type_final else (task_detection.detected if task_detection.detected else "regression")
+            st.success(f"✅ Configuration saved: {task_type_display.title()} task with {len(selected_features)} features")
+        
+        # "What you should do next" guidance
+        st.markdown("---")
+        st.header("🎯 What You Should Do Next")
+        
+        next_steps = []
+        
+        # Check for high missingness
+        if df is not None:
+            missing_cols = df[selected_features].isnull().sum()
+            high_missing = missing_cols[missing_cols > len(df) * 0.05]
+            if len(high_missing) > 0:
+                next_steps.append(f"🔍 **High missingness** in {len(high_missing)} columns → Run 'Missingness Scan' in EDA page")
+        
+        # Check for unit issues
+        if df is not None and target_col:
+            signals = compute_dataset_signals(df, target_col, task_type_final, cohort_type_final, entity_id_final)
+            if signals.unit_sanity_flags:
+                next_steps.append(f"⚖️ **Possible unit mismatch** detected → Run 'Physiologic Plausibility Check' in EDA page")
+        
+        # Check for longitudinal
+        if cohort_type_final == 'longitudinal' and entity_id_final:
+            next_steps.append(f"👥 **Longitudinal data** detected (Entity ID: {entity_id_final}) → Use group-based splitting in Train & Compare page")
+        
+        # Check for outliers (regression)
+        if task_type_final == 'regression' and df is not None and target_col:
+            target_data = df[target_col].dropna()
+            if len(target_data) > 0:
+                q1, q3 = target_data.quantile([0.25, 0.75])
+                iqr = q3 - q1
+                outliers = ((target_data < q1 - 1.5*iqr) | (target_data > q3 + 1.5*iqr)).sum()
+                if outliers > len(target_data) * 0.1:
+                    next_steps.append(f"📊 **High outlier rate** ({outliers/len(target_data):.1%}) → Consider robust models (Huber) or tree-based models")
+        
+        if not next_steps:
+            next_steps.append("✅ **Ready for EDA** → Go to EDA page to explore relationships and patterns")
+        
+        for step in next_steps:
+            st.markdown(f"• {step}")
+        
+        # State Debug (Advanced)
+        with st.expander("🔧 Advanced / State Debug", expanded=False):
+            st.markdown("**Current State:**")
+            st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
+            st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
+            st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
+            task_det = st.session_state.get('task_type_detection')
+            cohort_det = st.session_state.get('cohort_structure_detection')
+            st.write(f"• Task type (final): {task_det.final if task_det else 'None'}")
+            st.write(f"• Cohort type (final): {cohort_det.final if cohort_det else 'None'}")
+            st.write(f"• Entity ID (final): {cohort_det.entity_id_final if cohort_det else 'None'}")
+            unit_overrides = st.session_state.get('unit_overrides', {})
+            st.write(f"• Unit overrides: {len(unit_overrides)}")
         
     except Exception as e:
         st.error(f"❌ Error loading data: {str(e)}")
