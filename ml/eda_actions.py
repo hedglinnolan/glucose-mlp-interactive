@@ -182,6 +182,19 @@ def plausibility_check(
     if unit_overrides:
         findings.append(f"Using {len(unit_overrides)} user-specified unit overrides")
     
+    # Add insight if unit issues found
+    if signals.unit_sanity_flags or out_of_range:
+        num_unit_flags = len(signals.unit_sanity_flags) if signals.unit_sanity_flags else 0
+        num_out_of_range = len(out_of_range) if out_of_range else 0
+        insight_finding = f"Unit sanity check: {num_unit_flags} potential unit mismatches, {num_out_of_range} columns with out-of-range values"
+        insight_implication = "Verify units and consider unit overrides if needed. Out-of-range values may indicate data quality issues or unit conversion needed."
+        try:
+            import streamlit as st
+            from utils.storyline import add_insight
+            add_insight('unit_sanity', insight_finding, insight_implication, 'data_quality')
+        except:
+            pass
+    
     return {
         'findings': findings,
         'warnings': warnings,
@@ -248,6 +261,16 @@ def missingness_scan(
             assoc_df = pd.DataFrame(associations).sort_values('Difference', ascending=False)
             figures.append(('table', assoc_df))
             findings.append("Missingness may be informative (associated with target)")
+            # Add insight
+            top_assoc = assoc_df.iloc[0] if len(assoc_df) > 0 else None
+            if top_assoc is not None and top_assoc['Difference'] > 0:
+                insight_finding = f"Missingness in {top_assoc['Column']} correlates with target (Δ={top_assoc['Difference']:.2f})"
+                insight_implication = "Add missingness indicator features; consider tree/boosting models that handle missing values natively"
+                try:
+                    from utils.storyline import add_insight
+                    add_insight('missingness_association', insight_finding, insight_implication, 'data_quality')
+                except:
+                    pass
     elif signals.task_type_final == 'classification':
         # Compare class proportions
         associations = []
@@ -374,6 +397,17 @@ def target_profile(
             warnings.append("High skewness - consider log transform or robust loss")
         if outlier_rate > 0.05:
             warnings.append(f"High outlier rate ({outlier_rate:.1%}) - consider robust loss")
+        
+        # Add insight for outliers
+        if outlier_rate > 0.1:
+            insight_finding = f"High outlier rate in target: {outlier_rate:.1%}"
+            insight_implication = "Consider robust loss functions (Huber) or tree-based models (RF/ExtraTrees) which are less sensitive to outliers"
+            try:
+                import streamlit as st
+                from utils.storyline import add_insight
+                add_insight('target_outliers', insight_finding, insight_implication, 'target_characteristics')
+            except:
+                pass
     
     elif signals.task_type_final == 'classification':
         # Class counts
@@ -549,9 +583,21 @@ def collinearity_map(
     
     # Find high correlation pairs
     high_corr_pairs = signals.collinearity_summary.get('high_corr_pairs', [])
+    max_corr = signals.collinearity_summary.get('max_corr', 0)
     if high_corr_pairs:
         findings.append(f"Found {len(high_corr_pairs)} highly correlated pairs (>0.85)")
         warnings.append("High collinearity may cause GLM coefficient instability")
+    
+    # Add insight for high collinearity
+    if max_corr > 0.85:
+        insight_finding = f"High multicollinearity detected: max correlation = {max_corr:.2f}"
+        insight_implication = "Use regularized linear models (Ridge/Lasso/ElasticNet) to stabilize coefficients; consider PCA for dimensionality reduction"
+        try:
+            import streamlit as st
+            from utils.storyline import add_insight
+            add_insight('collinearity', insight_finding, insight_implication, 'feature_relationships')
+        except:
+            pass
     
     return {
         'findings': findings,

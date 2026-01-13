@@ -129,6 +129,7 @@ def init_session_state():
         'trained_models': {},  # Dict[str, Any] - model name -> model wrapper object
         'model_results': {},  # Dict[str, Dict] - model name -> metrics/history
         'fitted_estimators': {},  # Dict[str, Any] - model name -> fitted sklearn-compatible estimator/pipeline
+        'fitted_preprocessing_pipelines': {},  # Dict[str, Pipeline] - model name -> preprocessing pipeline used
         
         # Evaluation
         'cv_results': None,  # For k-fold CV
@@ -141,6 +142,7 @@ def init_session_state():
         
         # EDA
         'eda_results': {},  # Dict[str, Dict] - recommendation_id -> results
+        'eda_insights': [],  # List[Dict] - structured insights from EDA analyses
         
         # Report
         'report_data': None,

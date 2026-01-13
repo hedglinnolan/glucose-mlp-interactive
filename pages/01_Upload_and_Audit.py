@@ -15,8 +15,10 @@ from utils.session_state import (
 from utils.datasets import get_builtin_datasets
 from utils.reconcile import reconcile_target_features
 from utils.state_reconcile import reconcile_state_with_df
+from utils.storyline import render_progress_indicator
 from data_processor import load_and_preview_csv, get_numeric_columns
 from ml.triage import detect_task_type, detect_cohort_structure
+from ml.eda_recommender import compute_dataset_signals
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,9 @@ st.set_page_config(
 )
 
 st.title("📁 Upload & Data Audit")
+
+# Progress indicator
+render_progress_indicator("01_Upload_and_Audit")
 
 # Built-in datasets
 st.header("📚 Built-in Datasets (for Testing)")
@@ -533,7 +538,45 @@ if df is not None:
             # Safe getter for task type display
             task_type_display = task_type_final if task_type_final else (task_detection.detected if task_detection.detected else "regression")
             st.success(f"✅ Configuration saved: {task_type_display.title()} task with {len(selected_features)} features")
-            st.info(f"**Next:** Go to EDA page to explore your data")
+        
+        # "What you should do next" guidance
+        st.markdown("---")
+        st.header("🎯 What You Should Do Next")
+        
+        next_steps = []
+        
+        # Check for high missingness
+        if df is not None:
+            missing_cols = df[selected_features].isnull().sum()
+            high_missing = missing_cols[missing_cols > len(df) * 0.05]
+            if len(high_missing) > 0:
+                next_steps.append(f"🔍 **High missingness** in {len(high_missing)} columns → Run 'Missingness Scan' in EDA page")
+        
+        # Check for unit issues
+        if df is not None and target_col:
+            signals = compute_dataset_signals(df, target_col, task_type_final, cohort_type_final, entity_id_final)
+            if signals.unit_sanity_flags:
+                next_steps.append(f"⚖️ **Possible unit mismatch** detected → Run 'Physiologic Plausibility Check' in EDA page")
+        
+        # Check for longitudinal
+        if cohort_type_final == 'longitudinal' and entity_id_final:
+            next_steps.append(f"👥 **Longitudinal data** detected (Entity ID: {entity_id_final}) → Use group-based splitting in Train & Compare page")
+        
+        # Check for outliers (regression)
+        if task_type_final == 'regression' and df is not None and target_col:
+            target_data = df[target_col].dropna()
+            if len(target_data) > 0:
+                q1, q3 = target_data.quantile([0.25, 0.75])
+                iqr = q3 - q1
+                outliers = ((target_data < q1 - 1.5*iqr) | (target_data > q3 + 1.5*iqr)).sum()
+                if outliers > len(target_data) * 0.1:
+                    next_steps.append(f"📊 **High outlier rate** ({outliers/len(target_data):.1%}) → Consider robust models (Huber) or tree-based models")
+        
+        if not next_steps:
+            next_steps.append("✅ **Ready for EDA** → Go to EDA page to explore relationships and patterns")
+        
+        for step in next_steps:
+            st.markdown(f"• {step}")
         
         # State Debug (Advanced)
         with st.expander("🔧 Advanced / State Debug", expanded=False):

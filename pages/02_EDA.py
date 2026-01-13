@@ -14,14 +14,19 @@ from utils.session_state import (
     init_session_state, get_data, DataConfig,
     TaskTypeDetection, CohortStructureDetection
 )
+from utils.storyline import render_progress_indicator, add_insight, get_insights_by_category
 from data_processor import get_numeric_columns
 from ml.eda_recommender import compute_dataset_signals, recommend_eda, DatasetSignals
 from ml import eda_actions
+from ml.model_coach import coach_recommendations
 
 init_session_state()
 
 st.set_page_config(page_title="EDA", page_icon="📊", layout="wide")
 st.title("📊 Exploratory Data Analysis")
+
+# Progress indicator
+render_progress_indicator("02_EDA")
 
 df = get_data()
 if df is None:
@@ -45,6 +50,62 @@ cohort_type_final = cohort_structure_detection.final if cohort_structure_detecti
 entity_id_final = cohort_structure_detection.entity_id_final
 
 st.info(f"**Target:** {target_col} | **Features:** {len(feature_cols)} | **Task:** {task_type_final} | **Cohort:** {cohort_type_final}")
+
+# Key insights panel
+insights = get_insights_by_category()
+if insights:
+    with st.expander("💡 Key Insights So Far", expanded=True):
+        st.markdown("**Insights collected from EDA analyses:**")
+        for insight in insights:
+            st.markdown(f"**{insight.get('category', 'General').title()}:** {insight['finding']}")
+            st.caption(f"→ Implication: {insight['implication']}")
+else:
+    st.info("💡 Run EDA analyses below to collect insights that will guide model selection and preprocessing.")
+
+# Model Selection Coach (at top, before EDA recommendations)
+st.header("🎓 Model Selection Coach")
+st.markdown("**Based on your dataset characteristics, here are recommended model families to try:**")
+
+# Compute signals for coach
+signals = compute_dataset_signals(
+    df, target_col, task_type_final, cohort_type_final, entity_id_final
+)
+coach_recs = coach_recommendations(
+    signals, 
+    st.session_state.get('eda_results'),
+    get_insights_by_category()
+)
+
+if coach_recs:
+    for idx, rec in enumerate(coach_recs[:3]):  # Top 3 recommendations
+        with st.container():
+            # Use priority label for clarity
+            priority_label = "High" if rec.priority <= 2 else "Medium"
+            st.markdown(f"### {rec.group} Models ({priority_label} Priority)")
+            
+            # Show readiness checks if any
+            if hasattr(rec, 'readiness_checks') and rec.readiness_checks:
+                st.warning("⚠️ **Recommended prerequisites:**")
+                for check in rec.readiness_checks:
+                    st.write(f"• {check}")
+            
+            st.markdown("**Why:**")
+            for reason in rec.why:
+                st.write(f"• {reason}")
+            if rec.when_not_to_use:
+                st.markdown("**When not to use:**")
+                for caveat in rec.when_not_to_use:
+                    st.write(f"• {caveat}")
+            if rec.suggested_preprocessing:
+                st.markdown("**Suggested preprocessing:**")
+                for prep in rec.suggested_preprocessing:
+                    st.write(f"• {prep}")
+            
+            # Show recommended models
+            st.markdown(f"**Recommended models:** {', '.join(rec.recommended_models)}")
+            st.markdown("---")
+else:
+    st.info("Complete EDA analyses to get more specific model recommendations.")
 
 # Initialize EDA results storage
 if 'eda_results' not in st.session_state:
