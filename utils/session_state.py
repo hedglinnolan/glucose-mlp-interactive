@@ -139,6 +139,9 @@ def init_session_state():
         'permutation_importance': {},
         'partial_dependence': {},
         
+        # EDA
+        'eda_results': {},  # Dict[str, Dict] - recommendation_id -> results
+        
         # Report
         'report_data': None,
         
