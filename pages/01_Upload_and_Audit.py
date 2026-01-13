@@ -14,6 +14,7 @@ from utils.session_state import (
 )
 from utils.datasets import get_builtin_datasets
 from utils.reconcile import reconcile_target_features
+from utils.state_reconcile import reconcile_state_with_df
 from data_processor import load_and_preview_csv, get_numeric_columns
 from ml.triage import detect_task_type, detect_cohort_structure
 
@@ -61,6 +62,8 @@ if selected_dataset != 'None (Upload CSV)':
             df_builtin = generator(random_state=st.session_state.get('random_seed', 42))
             set_data(df_builtin)
             st.session_state.data_source = f"Built-in: {selected_dataset}"
+            # Reconcile state with new data
+            reconcile_state_with_df(df_builtin, st.session_state)
             st.success(f"✅ Generated {len(df_builtin)} rows")
             st.rerun()
 
@@ -94,6 +97,8 @@ if uploaded_file is not None:
                 df = load_and_preview_csv(uploaded_file)
                 set_data(df)
                 st.session_state.data_source = "Uploaded CSV"
+                # Reconcile state with new data
+                reconcile_state_with_df(df, st.session_state)
                 st.success(f"✅ Loaded {len(df):,} rows × {len(df.columns)} columns")
                 st.rerun()
         except Exception as e:
@@ -305,18 +310,20 @@ if df is not None:
             )
             feature_options = [col for col in numeric_cols if col != target_col_reconciled]
             
-            # Default features: use existing if valid, otherwise first 10
-            feature_defaults = []
-            if existing_features:
+            # Read from session_state if available, otherwise use existing
+            features_from_state = st.session_state.get('upload_features_multiselect')
+            if features_from_state is not None:
+                feature_defaults = [f for f in features_from_state if f in feature_options]
+            elif existing_features:
                 feature_defaults = [f for f in existing_features if f in feature_options]
-            if not feature_defaults:
+            else:
                 feature_defaults = feature_options[:min(10, len(feature_options))]
             
             selected_features = st.multiselect(
                 "Feature Variables",
                 options=feature_options,
                 default=feature_defaults,
-                key="features_multiselect",
+                key="upload_features_multiselect",
                 help="Select columns to use as predictors"
             )
         
@@ -333,7 +340,7 @@ if df is not None:
                 "Datetime Column (Optional, for time-series splits)",
                 options=['None'] + datetime_cols,
                 index=datetime_default_idx,
-                key="datetime_selectbox",
+                key="upload_datetime_selectbox",
                 help="Select if you want time-based splitting"
             )
             if datetime_col == 'None':
@@ -406,11 +413,11 @@ if df is not None:
                 # Override controls
                 st.subheader("⚙️ Manual Overrides")
                 
-                # Task type override
+                # Task type override - read from session_state
                 task_override_enabled = st.checkbox(
                     "Override task type",
-                    value=task_detection.override_enabled,
-                    key="task_override_checkbox",
+                    value=st.session_state.get('upload_task_override_checkbox', task_detection.override_enabled),
+                    key="upload_task_override_checkbox",
                     help="Manually set task type instead of using auto-detection"
                 )
                 
@@ -430,7 +437,7 @@ if df is not None:
                         "Task type",
                         ['regression', 'classification'],
                         index=task_default_idx,
-                        key="task_override_radio",
+                        key="upload_task_override_radio",
                         horizontal=True
                     )
                 
@@ -439,11 +446,11 @@ if df is not None:
                 task_detection.override_value = task_override_value
                 st.session_state.task_type_detection = task_detection
                 
-                # Cohort type override
+                # Cohort type override - read from session_state
                 cohort_override_enabled = st.checkbox(
                     "Override cohort structure",
-                    value=cohort_det.override_enabled,
-                    key="cohort_override_checkbox",
+                    value=st.session_state.get('upload_cohort_override_checkbox', cohort_det.override_enabled),
+                    key="upload_cohort_override_checkbox",
                     help="Manually set cohort structure instead of using auto-detection"
                 )
                 
@@ -461,16 +468,16 @@ if df is not None:
                         "Cohort structure",
                         ['cross_sectional', 'longitudinal'],
                         index=cohort_default_idx,
-                        key="cohort_override_radio",
+                        key="upload_cohort_override_radio",
                         horizontal=True,
                         format_func=lambda x: x.replace('_', ' ').title()
                     )
                 
-                # Entity ID override
+                # Entity ID override - read from session_state
                 entity_override_enabled = st.checkbox(
                     "Override entity ID column",
-                    value=cohort_det.entity_id_override_enabled,
-                    key="entity_id_override_checkbox",
+                    value=st.session_state.get('upload_entity_id_override_checkbox', cohort_det.entity_id_override_enabled),
+                    key="upload_entity_id_override_checkbox",
                     help="Manually select entity ID column for longitudinal data"
                 )
                 
@@ -488,7 +495,7 @@ if df is not None:
                         "Entity ID column",
                         options=entity_options,
                         index=entity_default_idx,
-                        key="entity_id_override_selectbox"
+                        key="upload_entity_id_override_selectbox"
                     )
                     if entity_override_value == 'None':
                         entity_override_value = None
@@ -527,6 +534,20 @@ if df is not None:
             task_type_display = task_type_final if task_type_final else (task_detection.detected if task_detection.detected else "regression")
             st.success(f"✅ Configuration saved: {task_type_display.title()} task with {len(selected_features)} features")
             st.info(f"**Next:** Go to EDA page to explore your data")
+        
+        # State Debug (Advanced)
+        with st.expander("🔧 Advanced / State Debug", expanded=False):
+            st.markdown("**Current State:**")
+            st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
+            st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
+            st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
+            task_det = st.session_state.get('task_type_detection')
+            cohort_det = st.session_state.get('cohort_structure_detection')
+            st.write(f"• Task type (final): {task_det.final if task_det else 'None'}")
+            st.write(f"• Cohort type (final): {cohort_det.final if cohort_det else 'None'}")
+            st.write(f"• Entity ID (final): {cohort_det.entity_id_final if cohort_det else 'None'}")
+            unit_overrides = st.session_state.get('unit_overrides', {})
+            st.write(f"• Unit overrides: {len(unit_overrides)}")
         
     except Exception as e:
         st.error(f"❌ Error loading data: {str(e)}")

@@ -159,51 +159,52 @@ st.markdown("---")
 
 # Manual mode (separate section)
 st.header("🔧 Manual Mode - Run Any Analysis")
-    action_names = [
-        'plausibility_check',
-        'missingness_scan',
-        'cohort_split_guidance',
-        'target_profile',
-        'dose_response_trends',
-        'collinearity_map',
-        'quick_probe_baselines'
-    ]
+
+action_names = [
+    'plausibility_check',
+    'missingness_scan',
+    'cohort_split_guidance',
+    'target_profile',
+    'dose_response_trends',
+    'collinearity_map',
+    'quick_probe_baselines'
+]
+
+selected_action = st.selectbox("Select analysis to run", action_names, key="eda_manual_action_select")
+
+if st.button("Run Selected Analysis", key="eda_manual_run_button"):
+    try:
+        action_func = getattr(eda_actions, selected_action, None)
+        if action_func:
+            with st.spinner(f"Running {selected_action}..."):
+                result = action_func(df, target_col, feature_cols, signals, st.session_state)
+                st.session_state.eda_results[f"manual_{selected_action}"] = result
+                st.rerun()
+        else:
+            st.error(f"Action '{selected_action}' not found")
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+
+# Show manual results
+manual_key = f"manual_{selected_action}"
+if manual_key in st.session_state.eda_results:
+    result = st.session_state.eda_results[manual_key]
+    st.markdown("**Results:**")
     
-    selected_action = st.selectbox("Select analysis to run", action_names, key="manual_action_select")
+    if result.get('findings'):
+        for finding in result['findings']:
+            st.write(f"✓ {finding}")
     
-    if st.button("Run Selected Analysis", key="manual_run_button"):
-        try:
-            action_func = getattr(eda_actions, selected_action, None)
-            if action_func:
-                with st.spinner(f"Running {selected_action}..."):
-                    result = action_func(df, target_col, feature_cols, signals, st.session_state)
-                    st.session_state.eda_results[f"manual_{selected_action}"] = result
-                    st.rerun()
-            else:
-                st.error(f"Action '{selected_action}' not found")
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
+    if result.get('warnings'):
+        for warning in result['warnings']:
+            st.warning(warning)
     
-    # Show manual results
-    manual_key = f"manual_{selected_action}"
-    if manual_key in st.session_state.eda_results:
-        result = st.session_state.eda_results[manual_key]
-        st.markdown("**Results:**")
-        
-        if result.get('findings'):
-            for finding in result['findings']:
-                st.write(f"✓ {finding}")
-        
-        if result.get('warnings'):
-            for warning in result['warnings']:
-                st.warning(warning)
-        
-        if result.get('figures'):
-            for fig_type, fig_data in result['figures']:
-                if fig_type == 'plotly':
-                    st.plotly_chart(fig_data, use_container_width=True)
-                elif fig_type == 'table':
-                    st.dataframe(fig_data, use_container_width=True)
+    if result.get('figures'):
+        for fig_type, fig_data in result['figures']:
+            if fig_type == 'plotly':
+                st.plotly_chart(fig_data, use_container_width=True)
+            elif fig_type == 'table':
+                st.dataframe(fig_data, use_container_width=True)
 
 # Explain recommendations
 with st.expander("📊 Explain Recommendations - Dataset Signals"):

@@ -42,19 +42,26 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("Numeric Features")
     if numeric_features:
+        # Read from session_state or use defaults
+        preprocessing_config = st.session_state.get('preprocessing_config', {})
         numeric_imputation = st.selectbox(
             "Imputation Strategy",
             ['median', 'mean', 'constant'],
+            index=['median', 'mean', 'constant'].index(preprocessing_config.get('numeric_imputation', 'median')),
+            key="preprocess_numeric_imputation",
             help="How to handle missing numeric values"
         )
         numeric_scaling = st.selectbox(
             "Scaling Strategy",
             ['standard', 'robust', 'none'],
+            index=['standard', 'robust', 'none'].index(preprocessing_config.get('numeric_scaling', 'standard')),
+            key="preprocess_numeric_scaling",
             help="Feature scaling method"
         )
         numeric_log_transform = st.checkbox(
             "Log Transform",
-            value=False,
+            value=st.session_state.get('preprocess_numeric_log_transform', False),
+            key="preprocess_numeric_log_transform",
             help="Apply log(1+x) transformation"
         )
     else:
@@ -69,11 +76,15 @@ with col2:
         categorical_imputation = st.selectbox(
             "Imputation Strategy",
             ['most_frequent', 'constant'],
+            index=['most_frequent', 'constant'].index(preprocessing_config.get('categorical_imputation', 'most_frequent')),
+            key="preprocess_categorical_imputation",
             help="How to handle missing categorical values"
         )
         categorical_encoding = st.selectbox(
             "Encoding Strategy",
             ['onehot'],
+            index=0,
+            key="preprocess_categorical_encoding",
             help="Categorical encoding method"
         )
     else:
@@ -82,7 +93,7 @@ with col2:
         categorical_encoding = 'onehot'
 
 # Build pipeline
-if st.button("🔨 Build Preprocessing Pipeline", type="primary"):
+if st.button("🔨 Build Preprocessing Pipeline", type="primary", key="preprocess_build_button"):
     try:
         with st.spinner("Building pipeline..."):
             pipeline = build_preprocessing_pipeline(

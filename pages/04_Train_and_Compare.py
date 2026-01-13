@@ -120,10 +120,14 @@ elif cohort_type_final == 'longitudinal' and not entity_id_final:
 # Time-series split option
 use_time_split = False
 if data_config.datetime_col:
+    time_split_default = st.session_state.get('train_use_time_split')
+    if time_split_default is None:
+        time_split_default = (cohort_type_final == 'longitudinal' and not entity_id_final)
     use_time_split = st.checkbox(
         "Use Time-Based Split",
-        value=(cohort_type_final == 'longitudinal' and not entity_id_final),
+        value=time_split_default,
         disabled=use_group_split,
+        key="train_use_time_split",
         help="Split data chronologically instead of randomly (recommended for time-series)"
     )
     if not use_time_split and not use_group_split:
@@ -131,12 +135,18 @@ if data_config.datetime_col:
 
 col1, col2, col3 = st.columns(3)
 
+# Read split sizes from session_state or use defaults
+split_config_existing = st.session_state.get('split_config')
+train_size_default = int((split_config_existing.train_size * 100) if split_config_existing and split_config_existing.train_size else 70)
+val_size_default = int((split_config_existing.val_size * 100) if split_config_existing and split_config_existing.val_size else 15)
+test_size_default = int((split_config_existing.test_size * 100) if split_config_existing and split_config_existing.test_size else 15)
+
 with col1:
-    train_size = st.slider("Train %", 50, 90, 70) / 100
+    train_size = st.slider("Train %", 50, 90, train_size_default, key="train_split_train_pct") / 100
 with col2:
-    val_size = st.slider("Val %", 5, 30, 15) / 100
+    val_size = st.slider("Val %", 5, 30, val_size_default, key="train_split_val_pct") / 100
 with col3:
-    test_size = st.slider("Test %", 5, 30, 15) / 100
+    test_size = st.slider("Test %", 5, 30, test_size_default, key="train_split_test_pct") / 100
 
 if abs(train_size + val_size + test_size - 1.0) > 0.01:
     st.error("⚠️ Splits must sum to 100%")
@@ -153,10 +163,12 @@ split_config = SplitConfig(
 )
 st.session_state.split_config = split_config
 
-# Cross-validation option
-use_cv = st.checkbox("Enable Cross-Validation", value=False)
+# Cross-validation option - read from session_state
+use_cv_default = st.session_state.get('use_cv', False)
+use_cv = st.checkbox("Enable Cross-Validation", value=use_cv_default, key="train_use_cv")
 if use_cv:
-    cv_folds = st.slider("CV Folds", 3, 10, 5)
+    cv_folds_default = st.session_state.get('cv_folds', 5)
+    cv_folds = st.slider("CV Folds", 3, 10, cv_folds_default, key="train_cv_folds")
     st.session_state.use_cv = True
     st.session_state.cv_folds = cv_folds
 else:
@@ -274,7 +286,7 @@ models_to_train = []
 col1, col2 = st.columns(2)
 
 with col1:
-    train_nn = st.checkbox("Neural Network", value=True)
+    train_nn = st.checkbox("Neural Network", value=st.session_state.get('train_model_nn', True), key="train_model_nn")
     if train_nn:
         if task_type_final == 'classification':
             st.info("ℹ️ Neural Network supports classification (BCE/CrossEntropy loss)")
@@ -287,7 +299,7 @@ with col1:
             model_config.nn_dropout = st.number_input("Dropout", 0.0, 0.5, 0.1, format="%.2f", key="nn_dropout")
         models_to_train.append('nn')
 
-    train_rf = st.checkbox("Random Forest", value=True)
+    train_rf = st.checkbox("Random Forest", value=st.session_state.get('train_model_rf', True), key="train_model_rf")
     if train_rf:
         with st.expander("RF Hyperparameters"):
             model_config.rf_n_estimators = st.number_input("N Estimators", 50, 1000, 500, key="rf_n_est")
@@ -296,11 +308,19 @@ with col1:
         models_to_train.append('rf')
 
 with col2:
-    train_glm = st.checkbox("GLM (OLS)" if task_type_final == 'regression' else "GLM (Logistic)", value=True)
+    train_glm = st.checkbox(
+        "GLM (OLS)" if task_type_final == 'regression' else "GLM (Logistic)", 
+        value=st.session_state.get('train_model_glm', True), 
+        key="train_model_glm"
+    )
     if train_glm:
         models_to_train.append('glm')
 
-    train_huber = st.checkbox("GLM (Huber)", value=(task_type_final == 'regression'))
+    train_huber = st.checkbox(
+        "GLM (Huber)", 
+        value=st.session_state.get('train_model_huber', task_type_final == 'regression'),
+        key="train_model_huber"
+    )
     if train_huber:
         if task_type_final == 'classification':
             st.warning("⚠️ Huber regression is for regression tasks only. Not suitable for classification.")
@@ -315,7 +335,7 @@ with col2:
 st.session_state.model_config = model_config
 
 # Training
-if st.button("🚀 Train Models", type="primary") and models_to_train:
+if st.button("🚀 Train Models", type="primary", key="train_models_button") and models_to_train:
     progress_container = st.container()
     
     for model_name in models_to_train:
@@ -425,8 +445,10 @@ if st.button("🚀 Train Models", type="primary") and models_to_train:
                 st.success(f"✅ {model_name.upper()} training complete!")
                 
             except Exception as e:
-                st.error(f"❌ Error training {model_name}: {str(e)}")
-                logger.exception(e)
+                with st.expander(f"❌ Error training {model_name.upper()}", expanded=True):
+                    st.error(f"Training failed: {str(e)}")
+                    st.code(str(e), language='python')
+                    logger.exception(e)
 
 # Results comparison
 if st.session_state.get('trained_models'):

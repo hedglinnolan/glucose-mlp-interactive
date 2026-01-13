@@ -43,7 +43,7 @@ if X_test is None or y_test is None:
 # Permutation Importance
 st.header("🎯 Permutation Importance")
 
-if st.button("Calculate Permutation Importance"):
+if st.button("Calculate Permutation Importance", key="explain_perm_importance_button"):
     perm_errors = []
     for name, model_wrapper in st.session_state.trained_models.items():
         try:
@@ -244,7 +244,11 @@ if st.session_state.get('partial_dependence'):
 # SHAP (Advanced)
 st.header("🔬 SHAP Analysis (Advanced)")
 
-use_shap = st.checkbox("Enable SHAP (requires shap package)", value=False, key="shap_enable")
+use_shap = st.checkbox(
+    "Enable SHAP (requires shap package)", 
+    value=st.session_state.get('explain_shap_enable', False), 
+    key="explain_shap_enable"
+)
 
 if use_shap:
     try:
