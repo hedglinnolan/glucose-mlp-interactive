@@ -599,6 +599,8 @@ with col2:
 
 with col3:
     # Create comprehensive zip package
+    # Get selected_model_params from session_state (needed for export)
+    selected_model_params = st.session_state.get('selected_model_params', {})
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -673,6 +675,18 @@ with col3:
         feature_names = st.session_state.get('feature_names', [])
         if feature_names:
             zip_file.writestr("feature_names.txt", "\n".join(feature_names))
+        
+        # Manifest with summary
+        manifest = {
+            'export_timestamp': datetime.now().isoformat(),
+            'models_trained': list(trained_models.keys()),
+            'metrics_summary': {name: results['metrics'] for name, results in model_results.items()},
+            'preprocessing_available': pipeline is not None,
+            'permutation_importance_available': len(st.session_state.get('permutation_importance', {})) > 0
+        }
+        if selected_model_params:
+            manifest['model_hyperparameters'] = selected_model_params
+        zip_file.writestr("manifest.json", json.dumps(manifest, indent=2, default=str))
     
     st.download_button(
         label="📦 Download Complete Package (ZIP)",
