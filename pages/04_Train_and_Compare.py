@@ -439,6 +439,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Initialize model_config and tracking variables (needed by both views and training)
+model_config = st.session_state.get('model_config', ModelConfig())
+models_to_train = []
+selected_model_params = st.session_state.get('selected_model_params', {})
+
 # Display models in buckets if we have coach output with detailed recommendations
 if coach_output and hasattr(coach_output, 'recommended_models') and coach_output.recommended_models:
     st.markdown("""
@@ -461,9 +466,6 @@ if coach_output and hasattr(coach_output, 'recommended_models') and coach_output
             f"🔄 Worth Trying ({len(coach_output.worth_trying_models)})",
             f"⛔ Not Recommended ({len(coach_output.not_recommended_models)})"
         ])
-        
-        models_to_train = []
-        selected_model_params = {}
         
         # Recommended Tab
         with tab_rec:
@@ -659,10 +661,6 @@ if model_view == "Model Family" or not coach_output:
     else:
         show_advanced = False
         st.caption("ℹ️ No advanced models available for this task type.")
-
-    model_config = ModelConfig()
-    models_to_train = []
-    selected_model_params = {}
 
     # Display models by group
     for group_name in sorted(model_groups.keys()):
