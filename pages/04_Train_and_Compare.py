@@ -5,10 +5,7 @@ Train models, evaluate, compare metrics, show diagnostics.
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
 from typing import Dict, List, Optional, Any
-from sklearn.model_selection import train_test_split, GroupShuffleSplit, GroupKFold
 import logging
 
 from utils.session_state import (
@@ -18,41 +15,64 @@ from utils.session_state import (
 )
 from utils.seed import set_global_seed, get_global_seed
 from utils.storyline import render_progress_indicator, get_insights_by_category
-from models.nn_whuber import NNWeightedHuberWrapper
-from models.glm import GLMWrapper
-from models.huber_glm import HuberGLMWrapper
-from models.rf import RFWrapper
-from models.registry_wrappers import RegistryModelWrapper
-from ml.model_registry import get_registry
-from sklearn.pipeline import Pipeline as SklearnPipeline
-from ml.eval import (
-    calculate_regression_metrics, calculate_classification_metrics,
-    perform_cross_validation, analyze_residuals
-)
 from ml.splits import to_numpy_1d
-try:
-    from visualizations import plot_training_history, plot_predictions_vs_actual, plot_residuals
-except ImportError:
-    # Fallback if visualizations module not found
-    import plotly.graph_objects as go
-    def plot_training_history(history):
-        fig = go.Figure()
-        epochs = range(1, len(history['train_loss']) + 1)
-        fig.add_trace(go.Scatter(x=list(epochs), y=history['train_loss'], name='Train Loss'))
-        if 'val_loss' in history:
-            fig.add_trace(go.Scatter(x=list(epochs), y=history['val_loss'], name='Val Loss'))
-        return fig
-    def plot_predictions_vs_actual(y_true, y_pred, title=""):
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=y_true, y=y_pred, mode='markers', name='Predictions'))
-        return fig
-    def plot_residuals(y_true, y_pred, title=""):
-        residuals = y_true - y_pred
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=y_pred, y=residuals, mode='markers', name='Residuals'))
-        return fig
 
 logger = logging.getLogger(__name__)
+
+# Lazy imports for heavy packages - only load when needed
+def _get_plotly():
+    """Lazy import plotly."""
+    import plotly.graph_objects as go
+    import plotly.express as px
+    return go, px
+
+def _get_sklearn_splits():
+    """Lazy import sklearn model_selection."""
+    from sklearn.model_selection import train_test_split, GroupShuffleSplit, GroupKFold
+    return train_test_split, GroupShuffleSplit, GroupKFold
+
+def _get_model_wrappers():
+    """Lazy import model wrappers - these load torch/sklearn models."""
+    from models.nn_whuber import NNWeightedHuberWrapper
+    from models.glm import GLMWrapper
+    from models.huber_glm import HuberGLMWrapper
+    from models.rf import RFWrapper
+    from models.registry_wrappers import RegistryModelWrapper
+    return NNWeightedHuberWrapper, GLMWrapper, HuberGLMWrapper, RFWrapper, RegistryModelWrapper
+
+def _get_eval_functions():
+    """Lazy import evaluation functions."""
+    from ml.eval import (
+        calculate_regression_metrics, calculate_classification_metrics,
+        perform_cross_validation, analyze_residuals
+    )
+    return calculate_regression_metrics, calculate_classification_metrics, perform_cross_validation, analyze_residuals
+
+def _get_visualization_functions():
+    """Lazy import visualization functions with fallback."""
+    try:
+        from visualizations import plot_training_history, plot_predictions_vs_actual, plot_residuals
+        return plot_training_history, plot_predictions_vs_actual, plot_residuals
+    except ImportError:
+        # Fallback if visualizations module not found
+        import plotly.graph_objects as go
+        def plot_training_history(history):
+            fig = go.Figure()
+            epochs = range(1, len(history['train_loss']) + 1)
+            fig.add_trace(go.Scatter(x=list(epochs), y=history['train_loss'], name='Train Loss'))
+            if 'val_loss' in history:
+                fig.add_trace(go.Scatter(x=list(epochs), y=history['val_loss'], name='Val Loss'))
+            return fig
+        def plot_predictions_vs_actual(y_true, y_pred, title=""):
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=y_true, y=y_pred, mode='markers', name='Predictions'))
+            return fig
+        def plot_residuals(y_true, y_pred, title=""):
+            residuals = y_true - y_pred
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=y_pred, y=residuals, mode='markers', name='Residuals'))
+            return fig
+        return plot_training_history, plot_predictions_vs_actual, plot_residuals
 
 init_session_state()
 
@@ -184,6 +204,9 @@ else:
 # Prepare data splits
 if st.button("🔄 Prepare Splits", type="primary"):
     try:
+        # Lazy import sklearn splitting functions
+        train_test_split, GroupShuffleSplit, GroupKFold = _get_sklearn_splits()
+        
         X = df[data_config.feature_cols]
         y = df[data_config.target_col]
         
@@ -298,9 +321,17 @@ y_train = st.session_state.y_train
 y_val = st.session_state.y_val
 y_test = st.session_state.y_test
 
-# Model Selection Coach (top section)
-from ml.model_coach import coach_recommendations
-from ml.eda_recommender import compute_dataset_signals
+# Model Selection Coach (top section) - cached for performance
+@st.cache_data
+def _compute_coach_recommendations(_df_hash, target_col, task_type, cohort_type, entity_id, eda_results_keys):
+    """Cached coach recommendations computation."""
+    from ml.model_coach import coach_recommendations
+    from ml.eda_recommender import compute_dataset_signals
+    
+    df = get_data()  # Get actual dataframe
+    signals = compute_dataset_signals(df, target_col, task_type, cohort_type, entity_id)
+    eda_results = st.session_state.get('eda_results')
+    return coach_recommendations(signals, eda_results, get_insights_by_category())
 
 # Show relevant insights
 insights = get_insights_by_category()
@@ -310,14 +341,12 @@ if insights:
             st.markdown(f"**{insight.get('category', 'General').title()}:** {insight['finding']}")
             st.caption(f"→ {insight['implication']}")
 
-# Compute signals for coach
-signals = compute_dataset_signals(
-    df, data_config.target_col, task_type_final, cohort_type_final, entity_id_final
-)
-coach_recs = coach_recommendations(
-    signals, 
-    st.session_state.get('eda_results'),
-    get_insights_by_category()
+# Compute coach recommendations (using cached function)
+# Create a hash for the dataframe to use as cache key
+_df_hash = hash((len(df), tuple(df.columns)))
+_eda_results_keys = tuple(sorted(st.session_state.get('eda_results', {}).keys()))
+coach_recs = _compute_coach_recommendations(
+    _df_hash, data_config.target_col, task_type_final, cohort_type_final, entity_id_final, _eda_results_keys
 )
 
 if coach_recs:
@@ -325,9 +354,10 @@ if coach_recs:
         st.markdown("**Based on your data, try these models first:**")
         for idx, rec in enumerate(coach_recs[:3]):  # Top 3
             with st.container():
-                # Use priority and index to make unique title/keys
+                # Use display_name for consistent naming
+                display_name = rec.display_name if hasattr(rec, 'display_name') else f"{rec.group} Models"
                 priority_label = "High" if rec.priority <= 2 else "Medium"
-                st.markdown(f"### {rec.group} Models ({priority_label} Priority)")
+                st.markdown(f"### {display_name} ({priority_label} Priority)")
                 
                 # Show readiness checks if any
                 if hasattr(rec, 'readiness_checks') and rec.readiness_checks:
@@ -336,11 +366,11 @@ if coach_recs:
                         st.write(f"• {check}")
                 
                 st.markdown("**Why:**")
-                for reason in rec.why:
+                for reason in rec.why[:5]:  # Limit to 5 reasons
                     st.write(f"• {reason}")
                 if rec.when_not_to_use:
                     st.markdown("**When not to use:**")
-                    for caveat in rec.when_not_to_use:
+                    for caveat in rec.when_not_to_use[:3]:  # Limit to 3
                         st.write(f"• {caveat}")
                 if rec.suggested_preprocessing:
                     st.markdown("**Suggested preprocessing:**")
@@ -349,114 +379,368 @@ if coach_recs:
                 
                 # Auto-select button with unique key (include priority and index)
                 button_key = f"coach_select_{rec.group}_p{rec.priority}_i{idx}"
-                if st.button(f"Select {rec.group} models", key=button_key):
+                if st.button(f"Select {display_name}", key=button_key):
                     # Store recommended models in session_state
                     for model_key in rec.recommended_models:
                         st.session_state[f'train_model_{model_key}'] = True
-                    st.success(f"✅ Selected {len(rec.recommended_models)} {rec.group} models")
+                    st.success(f"✅ Selected {len(rec.recommended_models)} {display_name}")
                     st.rerun()
 
 # Model selection and configuration
 st.header("🤖 Model Configuration")
 
-# Get registry and filter by task type
-registry = get_registry()
+# Get registry and filter by task type (cached)
+@st.cache_resource
+def _get_registry_cached():
+    """Cached registry access."""
+    from ml.model_registry import get_registry
+    return get_registry()
+
+registry = _get_registry_cached()
 available_models = {
     k: v for k, v in registry.items()
     if (task_type_final == 'regression' and v.capabilities.supports_regression) or
        (task_type_final == 'classification' and v.capabilities.supports_classification)
 }
 
-# Group models by group
-model_groups = {}
-for key, spec in available_models.items():
-    group = spec.group
-    if group not in model_groups:
-        model_groups[group] = []
-    model_groups[group].append((key, spec))
+# ============================================================================
+# COACH-INTEGRATED MODEL BUCKETS
+# ============================================================================
+# Get comprehensive coach output if available
+coach_output = st.session_state.get('coach_output')
 
-# Advanced models toggle
-show_advanced = st.checkbox("Show Advanced Models", value=st.session_state.get('show_advanced_models', False), key="show_advanced_models")
-advanced_groups = ['Margin', 'Probabilistic']  # SVM, Naive Bayes, LDA
+# CSS for model buckets
+st.markdown("""
+<style>
+.bucket-header {
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+}
+.bucket-recommended { background: #d4edda; color: #155724; border-left: 4px solid #28a745; }
+.bucket-worth-trying { background: #fff3cd; color: #856404; border-left: 4px solid #ffc107; }
+.bucket-not-recommended { background: #f8d7da; color: #721c24; border-left: 4px solid #dc3545; }
+.model-rationale {
+    font-size: 0.85rem;
+    color: #666;
+    padding: 0.25rem 0;
+}
+.training-time-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    margin-left: 0.5rem;
+}
+.time-fast { background: #d4edda; color: #155724; }
+.time-medium { background: #fff3cd; color: #856404; }
+.time-slow { background: #f8d7da; color: #721c24; }
+</style>
+""", unsafe_allow_html=True)
 
-model_config = ModelConfig()
+# Initialize model_config and tracking variables (needed by both views and training)
+model_config = st.session_state.get('model_config', ModelConfig())
 models_to_train = []
-selected_model_params = {}
+selected_model_params = st.session_state.get('selected_model_params', {})
 
-# Display models by group
-for group_name in sorted(model_groups.keys()):
-    if group_name in advanced_groups and not show_advanced:
-        continue
+# Display models in buckets if we have coach output with detailed recommendations
+if coach_output and hasattr(coach_output, 'recommended_models') and coach_output.recommended_models:
+    st.markdown("""
+    Models are organized by how well they fit your dataset. 
+    **Recommended** models are most likely to work well; **Worth Trying** may work with caveats; 
+    **Not Recommended** have significant limitations for your data.
+    """)
     
-    st.subheader(f"{group_name} Models")
-    group_models = model_groups[group_name]
+    model_view = st.radio(
+        "View models by:",
+        ["Coach Recommendations", "Model Family"],
+        horizontal=True,
+        key="model_view_mode"
+    )
     
-    for model_key, spec in group_models:
-        # Check if model is selected
-        checkbox_key = f"train_model_{model_key}"
-        is_selected = st.checkbox(
-            spec.name,
-            value=st.session_state.get(checkbox_key, False),
-            key=checkbox_key,
-            help=", ".join(spec.capabilities.notes) if spec.capabilities.notes else None
-        )
+    if model_view == "Coach Recommendations":
+        # Tab-based view of buckets
+        tab_rec, tab_try, tab_not = st.tabs([
+            f"✅ Recommended ({len(coach_output.recommended_models)})",
+            f"🔄 Worth Trying ({len(coach_output.worth_trying_models)})",
+            f"⛔ Not Recommended ({len(coach_output.not_recommended_models)})"
+        ])
         
-        if is_selected:
-            models_to_train.append(model_key)
+        # Recommended Tab
+        with tab_rec:
+            st.markdown('<div class="bucket-header bucket-recommended">✅ Recommended Models</div>', 
+                       unsafe_allow_html=True)
+            st.caption("These models are well-suited to your dataset.")
             
-            # Hyperparameter controls
-            if spec.hyperparam_schema:
-                with st.expander(f"{spec.name} Hyperparameters"):
-                    params = {}
-                    for param_name, param_def in spec.hyperparam_schema.items():
-                        param_key = f"{model_key}_{param_name}"
-                        if param_def['type'] == 'int':
-                            params[param_name] = st.number_input(
-                                param_def.get('help', param_name),
-                                min_value=param_def['min'],
-                                max_value=param_def['max'],
-                                value=param_def['default'],
-                                key=param_key
-                            )
-                        elif param_def['type'] == 'float':
-                            format_str = "%.4f" if param_def.get('log', False) else "%.2f"
-                            params[param_name] = st.number_input(
-                                param_def.get('help', param_name),
-                                min_value=param_def['min'],
-                                max_value=param_def['max'],
-                                value=param_def['default'],
-                                format=format_str,
-                                key=param_key
-                            )
-                        elif param_def['type'] == 'select':
-                            options = param_def['options']
-                            default_idx = options.index(param_def['default'])
-                            params[param_name] = st.selectbox(
-                                param_def.get('help', param_name),
-                                options=options,
-                                index=default_idx,
-                                key=param_key
-                            )
-                        elif param_def['type'] == 'int_or_none':
-                            # Special handling for max_depth=None
-                            use_none = st.checkbox(f"{param_name} = None (unlimited)", value=param_def['default'] is None, key=f"{param_key}_none")
-                            if use_none:
-                                params[param_name] = None
-                            else:
+            for rec in coach_output.recommended_models:
+                if rec.model_key not in available_models:
+                    continue
+                    
+                spec = available_models[rec.model_key]
+                time_class = f"time-{rec.training_time.value}"
+                time_label = rec.training_time.value.title()
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    checkbox_key = f"train_model_{rec.model_key}"
+                    is_selected = st.checkbox(
+                        f"**{rec.model_name}** ",
+                        value=st.session_state.get(checkbox_key, False),
+                        key=checkbox_key
+                    )
+                    st.markdown(f'<span class="model-rationale">{rec.dataset_fit_summary}</span>', 
+                               unsafe_allow_html=True)
+                with col2:
+                    st.markdown(f'<span class="training-time-badge {time_class}">{time_label}</span>',
+                               unsafe_allow_html=True)
+                
+                if is_selected:
+                    models_to_train.append(rec.model_key)
+                    
+                    # Show hyperparameters
+                    if spec.hyperparam_schema:
+                        with st.expander(f"⚙️ {rec.model_name} Settings"):
+                            st.markdown(f"*{rec.rationale}*")
+                            params = {}
+                            for param_name, param_def in spec.hyperparam_schema.items():
+                                param_key = f"{rec.model_key}_{param_name}"
+                                if param_def['type'] == 'int':
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['default'],
+                                        key=param_key
+                                    )
+                                elif param_def['type'] == 'float':
+                                    format_str = "%.4f" if param_def.get('log', False) else "%.2f"
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['default'],
+                                        format=format_str,
+                                        key=param_key
+                                    )
+                                elif param_def['type'] == 'select':
+                                    options = param_def['options']
+                                    default_idx = options.index(param_def['default'])
+                                    params[param_name] = st.selectbox(
+                                        param_def.get('help', param_name),
+                                        options=options,
+                                        index=default_idx,
+                                        key=param_key
+                                    )
+                            selected_model_params[rec.model_key] = params
+                
+                st.markdown("---")
+        
+        # Worth Trying Tab
+        with tab_try:
+            st.markdown('<div class="bucket-header bucket-worth-trying">🔄 Worth Trying</div>', 
+                       unsafe_allow_html=True)
+            st.caption("These models may work but have some caveats for your data.")
+            
+            for rec in coach_output.worth_trying_models:
+                if rec.model_key not in available_models:
+                    continue
+                    
+                spec = available_models[rec.model_key]
+                
+                with st.expander(f"**{rec.model_name}** — {rec.dataset_fit_summary}"):
+                    st.markdown(f"*{rec.rationale}*")
+                    if rec.risks:
+                        st.warning("**Risks:** " + "; ".join(rec.risks[:2]))
+                    
+                    checkbox_key = f"train_model_{rec.model_key}"
+                    is_selected = st.checkbox(
+                        f"Select {rec.model_name} for training",
+                        value=st.session_state.get(checkbox_key, False),
+                        key=checkbox_key
+                    )
+                    
+                    if is_selected:
+                        models_to_train.append(rec.model_key)
+                        if spec.hyperparam_schema:
+                            params = {}
+                            for param_name, param_def in spec.hyperparam_schema.items():
+                                param_key = f"{rec.model_key}_{param_name}"
+                                if param_def['type'] == 'int':
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['default'],
+                                        key=param_key
+                                    )
+                                elif param_def['type'] == 'float':
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['default'],
+                                        format="%.4f",
+                                        key=param_key
+                                    )
+                                elif param_def['type'] == 'select':
+                                    options = param_def['options']
+                                    default_idx = options.index(param_def['default'])
+                                    params[param_name] = st.selectbox(
+                                        param_def.get('help', param_name),
+                                        options=options,
+                                        index=default_idx,
+                                        key=param_key
+                                    )
+                            selected_model_params[rec.model_key] = params
+        
+        # Not Recommended Tab
+        with tab_not:
+            st.markdown('<div class="bucket-header bucket-not-recommended">⛔ Not Recommended</div>', 
+                       unsafe_allow_html=True)
+            st.caption("These models are not well-suited for your current dataset. Use with caution.")
+            
+            for rec in coach_output.not_recommended_models:
+                if rec.model_key not in available_models:
+                    continue
+                    
+                spec = available_models[rec.model_key]
+                
+                with st.expander(f"**{rec.model_name}** — Why not recommended"):
+                    st.error(f"**Reason:** {rec.rationale}")
+                    if rec.risks:
+                        for risk in rec.risks[:3]:
+                            st.markdown(f"• ⚠️ {risk}")
+                    
+                    st.markdown(f"**When this model IS appropriate:** {rec.when_to_use}")
+                    
+                    checkbox_key = f"train_model_{rec.model_key}"
+                    is_selected = st.checkbox(
+                        f"Train anyway (not recommended)",
+                        value=st.session_state.get(checkbox_key, False),
+                        key=checkbox_key
+                    )
+                    
+                    if is_selected:
+                        models_to_train.append(rec.model_key)
+                        st.warning("⚠️ You've selected a model that may not perform well on your data.")
+    else:
+        # Fall through to family-based view
+        pass
+else:
+    model_view = "Model Family"  # Default to family view if no coach output
+
+# Family-based model selection (original view or when coach not available)
+if model_view == "Model Family" or not coach_output:
+    # Group models by group
+    model_groups = {}
+    for key, spec in available_models.items():
+        group = spec.group
+        if group not in model_groups:
+            model_groups[group] = []
+        model_groups[group].append((key, spec))
+
+    # Define advanced model groups
+    advanced_groups = ['Margin', 'Probabilistic']  # SVM, Naive Bayes, LDA
+
+    # Check if there are any advanced models available for the current task type
+    advanced_model_count = sum(
+        len(model_groups.get(group, [])) 
+        for group in advanced_groups 
+        if group in model_groups
+    )
+
+    # Advanced models toggle - only show if there are advanced models
+    if advanced_model_count > 0:
+        show_advanced = st.checkbox(
+            f"Show Advanced Models ({advanced_model_count} available)", 
+            value=st.session_state.get('show_advanced_models', False), 
+            key="show_advanced_models",
+            help="Advanced models include SVMs, Naive Bayes, and Linear Discriminant Analysis"
+        )
+    else:
+        show_advanced = False
+        st.caption("ℹ️ No advanced models available for this task type.")
+
+    # Display models by group
+    for group_name in sorted(model_groups.keys()):
+        if group_name in advanced_groups and not show_advanced:
+            continue
+        
+        st.subheader(f"{group_name} Models")
+        group_models = model_groups[group_name]
+        
+        for model_key, spec in group_models:
+            # Check if model is selected
+            checkbox_key = f"train_model_{model_key}"
+            is_selected = st.checkbox(
+                spec.name,
+                value=st.session_state.get(checkbox_key, False),
+                key=checkbox_key,
+                help=", ".join(spec.capabilities.notes) if spec.capabilities.notes else None
+            )
+            
+            if is_selected:
+                models_to_train.append(model_key)
+                
+                # Hyperparameter controls
+                if spec.hyperparam_schema:
+                    with st.expander(f"{spec.name} Hyperparameters"):
+                        params = {}
+                        for param_name, param_def in spec.hyperparam_schema.items():
+                            param_key = f"{model_key}_{param_name}"
+                            if param_def['type'] == 'int':
                                 params[param_name] = st.number_input(
                                     param_def.get('help', param_name),
                                     min_value=param_def['min'],
                                     max_value=param_def['max'],
-                                    value=param_def['min'] if param_def['default'] is None else param_def['default'],
+                                    value=param_def['default'],
                                     key=param_key
                                 )
-                    
-                    selected_model_params[model_key] = params
+                            elif param_def['type'] == 'float':
+                                format_str = "%.4f" if param_def.get('log', False) else "%.2f"
+                                params[param_name] = st.number_input(
+                                    param_def.get('help', param_name),
+                                    min_value=param_def['min'],
+                                    max_value=param_def['max'],
+                                    value=param_def['default'],
+                                    format=format_str,
+                                    key=param_key
+                                )
+                            elif param_def['type'] == 'select':
+                                options = param_def['options']
+                                default_idx = options.index(param_def['default'])
+                                params[param_name] = st.selectbox(
+                                    param_def.get('help', param_name),
+                                    options=options,
+                                    index=default_idx,
+                                    key=param_key
+                                )
+                            elif param_def['type'] == 'int_or_none':
+                                # Special handling for max_depth=None
+                                use_none = st.checkbox(f"{param_name} = None (unlimited)", value=param_def['default'] is None, key=f"{param_key}_none")
+                                if use_none:
+                                    params[param_name] = None
+                                else:
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['min'] if param_def['default'] is None else param_def['default'],
+                                        key=param_key
+                                    )
+                        
+                        selected_model_params[model_key] = params
 
 st.session_state.model_config = model_config
 
 # Training
 if st.button("🚀 Train Models", type="primary", key="train_models_button") and models_to_train:
+    # Lazy import model wrappers and evaluation functions only when training
+    NNWeightedHuberWrapper, GLMWrapper, HuberGLMWrapper, RFWrapper, RegistryModelWrapper = _get_model_wrappers()
+    calculate_regression_metrics, calculate_classification_metrics, perform_cross_validation, analyze_residuals = _get_eval_functions()
+    from sklearn.pipeline import Pipeline as SklearnPipeline
+    
     progress_container = st.container()
     
     for model_name in models_to_train:
@@ -472,9 +756,31 @@ if st.button("🚀 Train Models", type="primary", key="train_models_button") and
                 # Handle existing wrappers (nn, rf, glm, huber) with special logic
                 if model_name == 'nn':
                     params = selected_model_params.get(model_name, {})
+                    
+                    # Compute hidden_layers from architecture parameters
+                    num_layers = params.get('num_layers', 2)
+                    layer_width = params.get('layer_width', 32)
+                    pattern = params.get('architecture_pattern', 'constant')
+                    
+                    if pattern == 'constant':
+                        hidden_layers = [layer_width] * num_layers
+                    elif pattern == 'pyramid':
+                        # Increasing width: 32 -> 64 -> 128
+                        hidden_layers = [layer_width * (2 ** i) for i in range(num_layers)]
+                    elif pattern == 'funnel':
+                        # Decreasing width: 128 -> 64 -> 32
+                        max_width = layer_width * (2 ** (num_layers - 1))
+                        hidden_layers = [max_width // (2 ** i) for i in range(num_layers)]
+                    else:
+                        hidden_layers = [layer_width] * num_layers
+                    
+                    status_text.text(f"Architecture: {hidden_layers} ({pattern})")
+                    
                     model = NNWeightedHuberWrapper(
+                        hidden_layers=hidden_layers,
                         dropout=params.get('dropout', model_config.nn_dropout),
-                        task_type=task_type_final
+                        task_type=task_type_final,
+                        activation=params.get('activation', 'relu')
                     )
                     def progress_cb(epoch, train_loss, val_loss, val_metric):
                         epochs = params.get('epochs', model_config.nn_epochs)
@@ -495,6 +801,9 @@ if st.button("🚀 Train Models", type="primary", key="train_models_button") and
                         progress_callback=progress_cb,
                         random_seed=st.session_state.get('random_seed', 42)
                     )
+                    
+                    # Store architecture info in results for reporting
+                    results['architecture'] = model.get_architecture_summary()
                 
                 elif model_name == 'rf':
                     params = selected_model_params.get(model_name, {})
@@ -603,6 +912,11 @@ if st.button("🚀 Train Models", type="primary", key="train_models_button") and
 
 # Results comparison
 if st.session_state.get('trained_models'):
+    # Lazy import plotly and visualization functions for results display
+    go, px = _get_plotly()
+    plot_training_history, plot_predictions_vs_actual, plot_residuals = _get_visualization_functions()
+    calculate_regression_metrics, calculate_classification_metrics, perform_cross_validation, analyze_residuals = _get_eval_functions()
+    
     st.header("📊 Results Comparison")
     
     # How to read results explainer

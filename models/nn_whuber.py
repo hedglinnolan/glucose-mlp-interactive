@@ -23,7 +23,8 @@ import torch.nn as nn
 class SimpleMLP(nn.Module):
     """Simplified MLP for regression and classification."""
     
-    def __init__(self, input_dim: int, hidden: list = [32, 32], dropout: float = 0.1, output_dim: int = 1):
+    def __init__(self, input_dim: int, hidden: list = [32, 32], dropout: float = 0.1, 
+                 output_dim: int = 1, activation: str = 'relu'):
         """
         Initialize MLP.
         
@@ -32,20 +33,32 @@ class SimpleMLP(nn.Module):
             hidden: List of hidden layer sizes
             dropout: Dropout rate
             output_dim: Output dimension (1 for regression/binary, n_classes for multiclass)
+            activation: Activation function ('relu', 'tanh', 'leaky_relu', 'elu')
         """
         super().__init__()
+        
+        # Select activation function
+        activation_map = {
+            'relu': nn.ReLU(),
+            'tanh': nn.Tanh(),
+            'leaky_relu': nn.LeakyReLU(0.1),
+            'elu': nn.ELU(),
+        }
+        activation_fn = activation_map.get(activation.lower(), nn.ReLU())
+        
         layers = []
         prev_dim = input_dim
         
         for h in hidden:
             layers.append(nn.Linear(prev_dim, h))
-            layers.append(nn.ReLU())
+            layers.append(activation_fn)
             layers.append(nn.Dropout(dropout))
             prev_dim = h
         
         layers.append(nn.Linear(prev_dim, output_dim))
         self.layers = nn.Sequential(*layers)
         self.output_dim = output_dim
+        self.activation_name = activation
     
     def forward(self, x):
         return self.layers(x)
@@ -209,7 +222,8 @@ def SklearnCompatibleNN(wrapper_instance=None, task_type='regression'):
 class NNWeightedHuberWrapper(BaseModelWrapper):
     """Wrapper for Neural Network with weighted Huber loss (regression) or BCE/CE loss (classification)."""
     
-    def __init__(self, hidden_layers: List[int] = None, dropout: float = 0.1, task_type: str = 'regression'):
+    def __init__(self, hidden_layers: List[int] = None, dropout: float = 0.1, 
+                 task_type: str = 'regression', activation: str = 'relu'):
         """
         Initialize NN wrapper.
         
@@ -217,16 +231,28 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
             hidden_layers: List of hidden layer sizes (default: [32, 32])
             dropout: Dropout rate
             task_type: 'regression' or 'classification'
+            activation: Activation function ('relu', 'tanh', 'leaky_relu', 'elu')
         """
         super().__init__("Neural Network")
         self.hidden_layers = hidden_layers or [32, 32]
         self.dropout = dropout
         self.task_type = task_type
+        self.activation = activation
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.history = None
         self._sklearn_estimator = None  # Lazy initialization
         self.classes_ = None  # For classification
         self.n_classes_ = None  # For classification
+    
+    def get_architecture_summary(self) -> Dict[str, Any]:
+        """Get a summary of the neural network architecture for reporting."""
+        return {
+            'hidden_layers': self.hidden_layers,
+            'num_layers': len(self.hidden_layers),
+            'dropout': self.dropout,
+            'activation': self.activation,
+            'total_params': sum(p.numel() for p in self.model.parameters()) if hasattr(self, 'model') else None
+        }
     
     def fit(self, X_train: np.ndarray, y_train: np.ndarray,
             X_val: Optional[np.ndarray] = None,
@@ -316,7 +342,8 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
             input_dim=X_train.shape[1],
             hidden=self.hidden_layers,
             dropout=self.dropout,
-            output_dim=output_dim
+            output_dim=output_dim,
+            activation=self.activation
         )
         self.model = self.model.to(self.device)
         
