@@ -82,7 +82,19 @@ def test_import_model_registry():
 
 @test("Import: ml.model_coach")
 def test_import_model_coach():
-    from ml.model_coach import coach_recommendations, CoachRecommendation, GROUP_DISPLAY_NAMES
+    from ml.model_coach import (
+        coach_recommendations, CoachRecommendation, GROUP_DISPLAY_NAMES,
+        compute_model_recommendations, ModelRecommendation, RecommendationBucket,
+        TrainingTimeTier, CoachOutput
+    )
+
+
+@test("Import: ml.dataset_profile")
+def test_import_dataset_profile():
+    from ml.dataset_profile import (
+        compute_dataset_profile, DatasetProfile, FeatureProfile, TargetProfile,
+        DataSufficiencyLevel, WarningLevel, DataWarning, get_profile_summary_text
+    )
 
 
 @test("Import: ml.eda_recommender")
@@ -259,6 +271,149 @@ def test_task_type_detection():
     assert det.final == 'classification', "Final should be override value when enabled"
 
 
+@test("DatasetProfile: compute_dataset_profile works")
+def test_dataset_profile():
+    import pandas as pd
+    import numpy as np
+    from ml.dataset_profile import compute_dataset_profile, DataSufficiencyLevel
+    
+    # Create simple test data
+    np.random.seed(42)
+    df = pd.DataFrame({
+        'feature1': np.random.randn(100),
+        'feature2': np.random.randn(100),
+        'category': np.random.choice(['A', 'B', 'C'], 100),
+        'target': np.random.randn(100)
+    })
+    
+    profile = compute_dataset_profile(
+        df, 
+        target_col='target',
+        feature_cols=['feature1', 'feature2', 'category'],
+        task_type='regression'
+    )
+    
+    assert profile.n_rows == 100, "Should have 100 rows"
+    assert profile.n_features == 3, "Should have 3 features"
+    assert profile.n_numeric == 2, "Should have 2 numeric features"
+    assert profile.n_categorical == 1, "Should have 1 categorical feature"
+    assert profile.target_profile is not None, "Should have target profile"
+    assert profile.target_profile.task_type == 'regression', "Should be regression"
+    assert profile.data_sufficiency in DataSufficiencyLevel, "Should have valid sufficiency level"
+
+
+@test("DatasetProfile: classification target detection")
+def test_profile_classification():
+    import pandas as pd
+    import numpy as np
+    from ml.dataset_profile import compute_dataset_profile
+    
+    np.random.seed(42)
+    df = pd.DataFrame({
+        'feature1': np.random.randn(200),
+        'target': np.random.choice([0, 1], 200, p=[0.8, 0.2])  # Imbalanced
+    })
+    
+    profile = compute_dataset_profile(
+        df, 
+        target_col='target',
+        feature_cols=['feature1'],
+        task_type='classification'
+    )
+    
+    assert profile.target_profile.task_type == 'classification'
+    assert profile.target_profile.n_classes == 2
+    assert profile.target_profile.is_imbalanced, "Should detect imbalance"
+
+
+@test("DatasetProfile: warnings generation")
+def test_profile_warnings():
+    import pandas as pd
+    import numpy as np
+    from ml.dataset_profile import compute_dataset_profile, WarningLevel
+    
+    # Create data with issues
+    np.random.seed(42)
+    df = pd.DataFrame({
+        'feature1': [1.0] * 20 + [np.nan] * 5,  # Small sample with missing
+        'target': list(range(25))
+    })
+    
+    profile = compute_dataset_profile(
+        df, 
+        target_col='target',
+        feature_cols=['feature1'],
+        task_type='regression'
+    )
+    
+    # Should have sample size warning
+    assert len(profile.warnings) > 0, "Should have warnings for small sample"
+    warning_categories = [w.category for w in profile.warnings]
+    assert 'sample_size' in warning_categories, "Should warn about small sample"
+
+
+@test("Coach: compute_model_recommendations works with profile")
+def test_coach_with_profile():
+    import pandas as pd
+    import numpy as np
+    from ml.dataset_profile import compute_dataset_profile
+    from ml.model_coach import compute_model_recommendations, RecommendationBucket
+    
+    np.random.seed(42)
+    df = pd.DataFrame({
+        'feature1': np.random.randn(500),
+        'feature2': np.random.randn(500),
+        'target': np.random.randn(500)
+    })
+    
+    profile = compute_dataset_profile(
+        df, 
+        target_col='target',
+        feature_cols=['feature1', 'feature2'],
+        task_type='regression'
+    )
+    
+    coach_output = compute_model_recommendations(profile)
+    
+    assert coach_output is not None, "Should return coach output"
+    assert len(coach_output.recommended_models) > 0 or len(coach_output.worth_trying_models) > 0, \
+        "Should have some recommendations"
+    assert coach_output.dataset_summary, "Should have dataset summary"
+    assert coach_output.preprocessing_recommendations is not None, "Should have preprocessing recs"
+    assert coach_output.baseline_eda, "Should have baseline EDA recommendations"
+    assert coach_output.advanced_eda_by_family, "Should have advanced EDA by family"
+
+
+@test("Coach: ModelRecommendation has required fields")
+def test_model_recommendation_fields():
+    from ml.model_coach import ModelRecommendation, RecommendationBucket, TrainingTimeTier
+    
+    rec = ModelRecommendation(
+        model_key='ridge',
+        model_name='Ridge Regression',
+        group='Linear',
+        bucket=RecommendationBucket.RECOMMENDED,
+        rationale='Good for this dataset',
+        dataset_fit_summary='Good fit',
+        strengths=['Interpretable'],
+        weaknesses=[],
+        risks=[],
+        training_time=TrainingTimeTier.FAST,
+        interpretability='high',
+        requires_scaling=True,
+        requires_encoding=True,
+        handles_missing=False,
+        plain_language_summary='Ridge is a regularized linear model.',
+        when_to_use='When features are correlated',
+        when_to_avoid='When relationships are nonlinear',
+        priority=10
+    )
+    
+    assert rec.model_key == 'ridge'
+    assert rec.bucket == RecommendationBucket.RECOMMENDED
+    assert rec.training_time == TrainingTimeTier.FAST
+
+
 # ============================================================
 # Main execution
 # ============================================================
@@ -266,15 +421,16 @@ def test_task_type_detection():
 def run_all_tests():
     """Run all registered tests."""
     print("\n" + "=" * 60)
-    print("🧪 Glucose MLP Interactive - Smoke Check")
+    print("Glucose MLP Interactive - Smoke Check")
     print("=" * 60 + "\n")
     
     # Run import tests
-    print("📦 Import Tests:")
+    print("Import Tests:")
     print("-" * 40)
     test_import_session_state()
     test_import_model_registry()
     test_import_model_coach()
+    test_import_dataset_profile()
     test_import_eda_recommender()
     test_import_triage()
     test_import_eval()
@@ -283,7 +439,7 @@ def run_all_tests():
     test_import_rf()
     test_import_data_processor()
     
-    print("\n🔧 Functional Tests:")
+    print("\nFunctional Tests:")
     print("-" * 40)
     test_registry_structure()
     test_nn_architecture_params()
@@ -293,6 +449,11 @@ def run_all_tests():
     test_nn_wrapper_activation()
     test_data_config()
     test_task_type_detection()
+    test_dataset_profile()
+    test_profile_classification()
+    test_profile_warnings()
+    test_coach_with_profile()
+    test_model_recommendation_fields()
     
     # Summary
     print("\n" + "=" * 60)
