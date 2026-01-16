@@ -531,9 +531,31 @@ if st.button("🚀 Train Models", type="primary", key="train_models_button") and
                 # Handle existing wrappers (nn, rf, glm, huber) with special logic
                 if model_name == 'nn':
                     params = selected_model_params.get(model_name, {})
+                    
+                    # Compute hidden_layers from architecture parameters
+                    num_layers = params.get('num_layers', 2)
+                    layer_width = params.get('layer_width', 32)
+                    pattern = params.get('architecture_pattern', 'constant')
+                    
+                    if pattern == 'constant':
+                        hidden_layers = [layer_width] * num_layers
+                    elif pattern == 'pyramid':
+                        # Increasing width: 32 -> 64 -> 128
+                        hidden_layers = [layer_width * (2 ** i) for i in range(num_layers)]
+                    elif pattern == 'funnel':
+                        # Decreasing width: 128 -> 64 -> 32
+                        max_width = layer_width * (2 ** (num_layers - 1))
+                        hidden_layers = [max_width // (2 ** i) for i in range(num_layers)]
+                    else:
+                        hidden_layers = [layer_width] * num_layers
+                    
+                    status_text.text(f"Architecture: {hidden_layers} ({pattern})")
+                    
                     model = NNWeightedHuberWrapper(
+                        hidden_layers=hidden_layers,
                         dropout=params.get('dropout', model_config.nn_dropout),
-                        task_type=task_type_final
+                        task_type=task_type_final,
+                        activation=params.get('activation', 'relu')
                     )
                     def progress_cb(epoch, train_loss, val_loss, val_metric):
                         epochs = params.get('epochs', model_config.nn_epochs)
@@ -554,6 +576,9 @@ if st.button("🚀 Train Models", type="primary", key="train_models_button") and
                         progress_callback=progress_cb,
                         random_seed=st.session_state.get('random_seed', 42)
                     )
+                    
+                    # Store architecture info in results for reporting
+                    results['architecture'] = model.get_architecture_summary()
                 
                 elif model_name == 'rf':
                     params = selected_model_params.get(model_name, {})

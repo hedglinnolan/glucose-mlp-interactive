@@ -457,13 +457,21 @@ def get_registry() -> Dict[str, ModelSpec]:
         name='Neural Network',
         group='Neural Net',
         factory=_create_nn,
-        default_params={'dropout': 0.1, 'epochs': 200, 'batch_size': 256, 'lr': 0.0015, 'weight_decay': 0.0002, 'patience': 30},
+        default_params={
+            'dropout': 0.1, 'epochs': 200, 'batch_size': 256, 'lr': 0.0015, 
+            'weight_decay': 0.0002, 'patience': 30, 'num_layers': 2, 
+            'layer_width': 32, 'activation': 'relu', 'architecture_pattern': 'constant'
+        },
         hyperparam_schema={
+            'num_layers': {'type': 'int', 'min': 1, 'max': 5, 'default': 2, 'help': 'Number of hidden layers'},
+            'layer_width': {'type': 'int', 'min': 8, 'max': 256, 'default': 32, 'help': 'Base layer width'},
+            'architecture_pattern': {'type': 'select', 'options': ['constant', 'pyramid', 'funnel'], 'default': 'constant', 'help': 'Layer width pattern'},
+            'activation': {'type': 'select', 'options': ['relu', 'tanh', 'leaky_relu', 'elu'], 'default': 'relu', 'help': 'Activation function'},
             'dropout': {'type': 'float', 'min': 0.0, 'max': 0.5, 'default': 0.1, 'help': 'Dropout rate'},
             'epochs': {'type': 'int', 'min': 50, 'max': 500, 'default': 200, 'help': 'Number of epochs'},
             'batch_size': {'type': 'int', 'min': 32, 'max': 512, 'default': 256, 'help': 'Batch size'},
             'lr': {'type': 'float', 'min': 1e-5, 'max': 1e-2, 'default': 0.0015, 'log': True, 'help': 'Learning rate'},
-            'weight_decay': {'type': 'float', 'min': 0.0, 'max': 1e-2, 'default': 0.0002, 'log': True, 'help': 'Weight decay'},
+            'weight_decay': {'type': 'float', 'min': 0.0, 'max': 1e-2, 'default': 0.0002, 'log': True, 'help': 'L2 regularization (weight decay)'},
             'patience': {'type': 'int', 'min': 5, 'max': 50, 'default': 30, 'help': 'Early stopping patience'}
         },
         capabilities=ModelCapabilities(
