@@ -12,7 +12,7 @@ from sklearn.inspection import permutation_importance, partial_dependence
 import logging
 
 from utils.session_state import (
-    init_session_state, get_preprocessing_pipeline, DataConfig
+    init_session_state, get_preprocessing_pipeline, DataConfig, get_data
 )
 from utils.storyline import render_progress_indicator
 from ml.estimator_utils import is_estimator_fitted
@@ -396,6 +396,29 @@ if use_shap:
                 help="Number of samples to compute SHAP values for (larger = more detailed but slower)"
             )
         
+        # Model SHAP support summary
+        st.markdown("**SHAP Support by Model:**")
+        shap_support_info = []
+        for name, model_wrapper in st.session_state.trained_models.items():
+            spec = registry.get(name)
+            if spec:
+                support = spec.capabilities.supports_shap
+                support_label = {
+                    'tree': '🟢 Fast (TreeExplainer)',
+                    'linear': '🟢 Fast (LinearExplainer)',
+                    'kernel': '🟡 Slow (KernelExplainer)',
+                    'none': '🔴 Not supported'
+                }.get(support, '⚪ Unknown')
+                shap_support_info.append(f"• **{name.upper()}**: {support_label}")
+        st.markdown("\n".join(shap_support_info))
+        
+        # Run SHAP button
+        run_shap = st.button("🚀 Run SHAP Analysis", type="primary", key="run_shap_button")
+        
+        if not run_shap:
+            st.info("👆 Click the button above to compute SHAP values. This may take a while depending on your data and model types.")
+            st.stop()
+        
         for name, model_wrapper in st.session_state.trained_models.items():
             st.subheader(f"{name.upper()} - SHAP Values")
             
@@ -404,10 +427,10 @@ if use_shap:
             if spec:
                 shap_support = spec.capabilities.supports_shap
                 if shap_support == 'none':
-                    st.warning(f"⚠️ {name.upper()}: SHAP not supported for this model type (capability: {shap_support})")
+                    st.warning(f"⚠️ {name.upper()}: SHAP not supported for this model type.")
                     continue
                 elif shap_support == 'kernel':
-                    st.info(f"ℹ️ {name.upper()}: Using KernelExplainer (may be slow for large datasets)")
+                    st.info(f"ℹ️ {name.upper()}: Using KernelExplainer (may be slow)")
             
             # Get the fitted sklearn-compatible estimator from session_state
             if name not in st.session_state.get('fitted_estimators', {}):
@@ -585,9 +608,11 @@ if use_shap:
 # State Debug (Advanced)
 with st.expander("🔧 Advanced / State Debug", expanded=False):
     st.markdown("**Current State:**")
-    st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
+    _df = get_data()  # Get data from session state
+    st.write(f"• Data shape: {_df.shape if _df is not None else 'None'}")
     st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
     st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
+    st.write(f"• X_test shape: {X_test.shape if X_test is not None else 'None'}")
     task_det = st.session_state.get('task_type_detection')
     cohort_det = st.session_state.get('cohort_structure_detection')
     st.write(f"• Task type (final): {task_det.final if task_det else 'None'}")
