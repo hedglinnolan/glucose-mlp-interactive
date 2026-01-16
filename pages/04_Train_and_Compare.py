@@ -5,10 +5,7 @@ Train models, evaluate, compare metrics, show diagnostics.
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
 from typing import Dict, List, Optional, Any
-from sklearn.model_selection import train_test_split, GroupShuffleSplit, GroupKFold
 import logging
 
 from utils.session_state import (
@@ -18,41 +15,64 @@ from utils.session_state import (
 )
 from utils.seed import set_global_seed, get_global_seed
 from utils.storyline import render_progress_indicator, get_insights_by_category
-from models.nn_whuber import NNWeightedHuberWrapper
-from models.glm import GLMWrapper
-from models.huber_glm import HuberGLMWrapper
-from models.rf import RFWrapper
-from models.registry_wrappers import RegistryModelWrapper
-from ml.model_registry import get_registry
-from sklearn.pipeline import Pipeline as SklearnPipeline
-from ml.eval import (
-    calculate_regression_metrics, calculate_classification_metrics,
-    perform_cross_validation, analyze_residuals
-)
 from ml.splits import to_numpy_1d
-try:
-    from visualizations import plot_training_history, plot_predictions_vs_actual, plot_residuals
-except ImportError:
-    # Fallback if visualizations module not found
-    import plotly.graph_objects as go
-    def plot_training_history(history):
-        fig = go.Figure()
-        epochs = range(1, len(history['train_loss']) + 1)
-        fig.add_trace(go.Scatter(x=list(epochs), y=history['train_loss'], name='Train Loss'))
-        if 'val_loss' in history:
-            fig.add_trace(go.Scatter(x=list(epochs), y=history['val_loss'], name='Val Loss'))
-        return fig
-    def plot_predictions_vs_actual(y_true, y_pred, title=""):
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=y_true, y=y_pred, mode='markers', name='Predictions'))
-        return fig
-    def plot_residuals(y_true, y_pred, title=""):
-        residuals = y_true - y_pred
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=y_pred, y=residuals, mode='markers', name='Residuals'))
-        return fig
 
 logger = logging.getLogger(__name__)
+
+# Lazy imports for heavy packages - only load when needed
+def _get_plotly():
+    """Lazy import plotly."""
+    import plotly.graph_objects as go
+    import plotly.express as px
+    return go, px
+
+def _get_sklearn_splits():
+    """Lazy import sklearn model_selection."""
+    from sklearn.model_selection import train_test_split, GroupShuffleSplit, GroupKFold
+    return train_test_split, GroupShuffleSplit, GroupKFold
+
+def _get_model_wrappers():
+    """Lazy import model wrappers - these load torch/sklearn models."""
+    from models.nn_whuber import NNWeightedHuberWrapper
+    from models.glm import GLMWrapper
+    from models.huber_glm import HuberGLMWrapper
+    from models.rf import RFWrapper
+    from models.registry_wrappers import RegistryModelWrapper
+    return NNWeightedHuberWrapper, GLMWrapper, HuberGLMWrapper, RFWrapper, RegistryModelWrapper
+
+def _get_eval_functions():
+    """Lazy import evaluation functions."""
+    from ml.eval import (
+        calculate_regression_metrics, calculate_classification_metrics,
+        perform_cross_validation, analyze_residuals
+    )
+    return calculate_regression_metrics, calculate_classification_metrics, perform_cross_validation, analyze_residuals
+
+def _get_visualization_functions():
+    """Lazy import visualization functions with fallback."""
+    try:
+        from visualizations import plot_training_history, plot_predictions_vs_actual, plot_residuals
+        return plot_training_history, plot_predictions_vs_actual, plot_residuals
+    except ImportError:
+        # Fallback if visualizations module not found
+        import plotly.graph_objects as go
+        def plot_training_history(history):
+            fig = go.Figure()
+            epochs = range(1, len(history['train_loss']) + 1)
+            fig.add_trace(go.Scatter(x=list(epochs), y=history['train_loss'], name='Train Loss'))
+            if 'val_loss' in history:
+                fig.add_trace(go.Scatter(x=list(epochs), y=history['val_loss'], name='Val Loss'))
+            return fig
+        def plot_predictions_vs_actual(y_true, y_pred, title=""):
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=y_true, y=y_pred, mode='markers', name='Predictions'))
+            return fig
+        def plot_residuals(y_true, y_pred, title=""):
+            residuals = y_true - y_pred
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=y_pred, y=residuals, mode='markers', name='Residuals'))
+            return fig
+        return plot_training_history, plot_predictions_vs_actual, plot_residuals
 
 init_session_state()
 
@@ -184,6 +204,9 @@ else:
 # Prepare data splits
 if st.button("🔄 Prepare Splits", type="primary"):
     try:
+        # Lazy import sklearn splitting functions
+        train_test_split, GroupShuffleSplit, GroupKFold = _get_sklearn_splits()
+        
         X = df[data_config.feature_cols]
         y = df[data_config.target_col]
         
@@ -298,9 +321,17 @@ y_train = st.session_state.y_train
 y_val = st.session_state.y_val
 y_test = st.session_state.y_test
 
-# Model Selection Coach (top section)
-from ml.model_coach import coach_recommendations
-from ml.eda_recommender import compute_dataset_signals
+# Model Selection Coach (top section) - cached for performance
+@st.cache_data
+def _compute_coach_recommendations(_df_hash, target_col, task_type, cohort_type, entity_id, eda_results_keys):
+    """Cached coach recommendations computation."""
+    from ml.model_coach import coach_recommendations
+    from ml.eda_recommender import compute_dataset_signals
+    
+    df = get_data()  # Get actual dataframe
+    signals = compute_dataset_signals(df, target_col, task_type, cohort_type, entity_id)
+    eda_results = st.session_state.get('eda_results')
+    return coach_recommendations(signals, eda_results, get_insights_by_category())
 
 # Show relevant insights
 insights = get_insights_by_category()
@@ -310,14 +341,12 @@ if insights:
             st.markdown(f"**{insight.get('category', 'General').title()}:** {insight['finding']}")
             st.caption(f"→ {insight['implication']}")
 
-# Compute signals for coach
-signals = compute_dataset_signals(
-    df, data_config.target_col, task_type_final, cohort_type_final, entity_id_final
-)
-coach_recs = coach_recommendations(
-    signals, 
-    st.session_state.get('eda_results'),
-    get_insights_by_category()
+# Compute coach recommendations (using cached function)
+# Create a hash for the dataframe to use as cache key
+_df_hash = hash((len(df), tuple(df.columns)))
+_eda_results_keys = tuple(sorted(st.session_state.get('eda_results', {}).keys()))
+coach_recs = _compute_coach_recommendations(
+    _df_hash, data_config.target_col, task_type_final, cohort_type_final, entity_id_final, _eda_results_keys
 )
 
 if coach_recs:
@@ -360,8 +389,14 @@ if coach_recs:
 # Model selection and configuration
 st.header("🤖 Model Configuration")
 
-# Get registry and filter by task type
-registry = get_registry()
+# Get registry and filter by task type (cached)
+@st.cache_resource
+def _get_registry_cached():
+    """Cached registry access."""
+    from ml.model_registry import get_registry
+    return get_registry()
+
+registry = _get_registry_cached()
 available_models = {
     k: v for k, v in registry.items()
     if (task_type_final == 'regression' and v.capabilities.supports_regression) or
@@ -458,6 +493,11 @@ st.session_state.model_config = model_config
 
 # Training
 if st.button("🚀 Train Models", type="primary", key="train_models_button") and models_to_train:
+    # Lazy import model wrappers and evaluation functions only when training
+    NNWeightedHuberWrapper, GLMWrapper, HuberGLMWrapper, RFWrapper, RegistryModelWrapper = _get_model_wrappers()
+    calculate_regression_metrics, calculate_classification_metrics, perform_cross_validation, analyze_residuals = _get_eval_functions()
+    from sklearn.pipeline import Pipeline as SklearnPipeline
+    
     progress_container = st.container()
     
     for model_name in models_to_train:
@@ -604,6 +644,11 @@ if st.button("🚀 Train Models", type="primary", key="train_models_button") and
 
 # Results comparison
 if st.session_state.get('trained_models'):
+    # Lazy import plotly and visualization functions for results display
+    go, px = _get_plotly()
+    plot_training_history, plot_predictions_vs_actual, plot_residuals = _get_visualization_functions()
+    calculate_regression_metrics, calculate_classification_metrics, perform_cross_validation, analyze_residuals = _get_eval_functions()
+    
     st.header("📊 Results Comparison")
     
     # How to read results explainer
