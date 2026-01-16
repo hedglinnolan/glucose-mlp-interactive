@@ -411,9 +411,27 @@ for key, spec in available_models.items():
         model_groups[group] = []
     model_groups[group].append((key, spec))
 
-# Advanced models toggle
-show_advanced = st.checkbox("Show Advanced Models", value=st.session_state.get('show_advanced_models', False), key="show_advanced_models")
+# Define advanced model groups
 advanced_groups = ['Margin', 'Probabilistic']  # SVM, Naive Bayes, LDA
+
+# Check if there are any advanced models available for the current task type
+advanced_model_count = sum(
+    len(model_groups.get(group, [])) 
+    for group in advanced_groups 
+    if group in model_groups
+)
+
+# Advanced models toggle - only show if there are advanced models
+if advanced_model_count > 0:
+    show_advanced = st.checkbox(
+        f"Show Advanced Models ({advanced_model_count} available)", 
+        value=st.session_state.get('show_advanced_models', False), 
+        key="show_advanced_models",
+        help="Advanced models include SVMs, Naive Bayes, and Linear Discriminant Analysis"
+    )
+else:
+    show_advanced = False
+    st.caption("ℹ️ No advanced models available for this task type.")
 
 model_config = ModelConfig()
 models_to_train = []
