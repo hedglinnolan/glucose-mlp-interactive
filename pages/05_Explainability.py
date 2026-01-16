@@ -200,6 +200,11 @@ if st.button("Calculate Partial Dependence"):
     pd_errors = []
     for name, model_wrapper in st.session_state.trained_models.items():
         try:
+            # Explicitly disable PDP for NN (sklearn partial_dependence doesn't work reliably with custom NN wrappers)
+            if name == 'nn':
+                pd_errors.append(f"{name}: Partial dependence not supported for neural networks. Use SHAP or permutation importance instead.")
+                continue
+            
             # Check capability from registry
             spec = registry.get(name)
             if spec and not spec.capabilities.supports_partial_dependence:
