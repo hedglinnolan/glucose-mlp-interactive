@@ -403,109 +403,336 @@ available_models = {
        (task_type_final == 'classification' and v.capabilities.supports_classification)
 }
 
-# Group models by group
-model_groups = {}
-for key, spec in available_models.items():
-    group = spec.group
-    if group not in model_groups:
-        model_groups[group] = []
-    model_groups[group].append((key, spec))
+# ============================================================================
+# COACH-INTEGRATED MODEL BUCKETS
+# ============================================================================
+# Get comprehensive coach output if available
+coach_output = st.session_state.get('coach_output')
 
-# Define advanced model groups
-advanced_groups = ['Margin', 'Probabilistic']  # SVM, Naive Bayes, LDA
+# CSS for model buckets
+st.markdown("""
+<style>
+.bucket-header {
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+}
+.bucket-recommended { background: #d4edda; color: #155724; border-left: 4px solid #28a745; }
+.bucket-worth-trying { background: #fff3cd; color: #856404; border-left: 4px solid #ffc107; }
+.bucket-not-recommended { background: #f8d7da; color: #721c24; border-left: 4px solid #dc3545; }
+.model-rationale {
+    font-size: 0.85rem;
+    color: #666;
+    padding: 0.25rem 0;
+}
+.training-time-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    margin-left: 0.5rem;
+}
+.time-fast { background: #d4edda; color: #155724; }
+.time-medium { background: #fff3cd; color: #856404; }
+.time-slow { background: #f8d7da; color: #721c24; }
+</style>
+""", unsafe_allow_html=True)
 
-# Check if there are any advanced models available for the current task type
-advanced_model_count = sum(
-    len(model_groups.get(group, [])) 
-    for group in advanced_groups 
-    if group in model_groups
-)
-
-# Advanced models toggle - only show if there are advanced models
-if advanced_model_count > 0:
-    show_advanced = st.checkbox(
-        f"Show Advanced Models ({advanced_model_count} available)", 
-        value=st.session_state.get('show_advanced_models', False), 
-        key="show_advanced_models",
-        help="Advanced models include SVMs, Naive Bayes, and Linear Discriminant Analysis"
+# Display models in buckets if we have coach output with detailed recommendations
+if coach_output and hasattr(coach_output, 'recommended_models') and coach_output.recommended_models:
+    st.markdown("""
+    Models are organized by how well they fit your dataset. 
+    **Recommended** models are most likely to work well; **Worth Trying** may work with caveats; 
+    **Not Recommended** have significant limitations for your data.
+    """)
+    
+    model_view = st.radio(
+        "View models by:",
+        ["Coach Recommendations", "Model Family"],
+        horizontal=True,
+        key="model_view_mode"
     )
-else:
-    show_advanced = False
-    st.caption("ℹ️ No advanced models available for this task type.")
-
-model_config = ModelConfig()
-models_to_train = []
-selected_model_params = {}
-
-# Display models by group
-for group_name in sorted(model_groups.keys()):
-    if group_name in advanced_groups and not show_advanced:
-        continue
     
-    st.subheader(f"{group_name} Models")
-    group_models = model_groups[group_name]
-    
-    for model_key, spec in group_models:
-        # Check if model is selected
-        checkbox_key = f"train_model_{model_key}"
-        is_selected = st.checkbox(
-            spec.name,
-            value=st.session_state.get(checkbox_key, False),
-            key=checkbox_key,
-            help=", ".join(spec.capabilities.notes) if spec.capabilities.notes else None
-        )
+    if model_view == "Coach Recommendations":
+        # Tab-based view of buckets
+        tab_rec, tab_try, tab_not = st.tabs([
+            f"✅ Recommended ({len(coach_output.recommended_models)})",
+            f"🔄 Worth Trying ({len(coach_output.worth_trying_models)})",
+            f"⛔ Not Recommended ({len(coach_output.not_recommended_models)})"
+        ])
         
-        if is_selected:
-            models_to_train.append(model_key)
+        models_to_train = []
+        selected_model_params = {}
+        
+        # Recommended Tab
+        with tab_rec:
+            st.markdown('<div class="bucket-header bucket-recommended">✅ Recommended Models</div>', 
+                       unsafe_allow_html=True)
+            st.caption("These models are well-suited to your dataset.")
             
-            # Hyperparameter controls
-            if spec.hyperparam_schema:
-                with st.expander(f"{spec.name} Hyperparameters"):
-                    params = {}
-                    for param_name, param_def in spec.hyperparam_schema.items():
-                        param_key = f"{model_key}_{param_name}"
-                        if param_def['type'] == 'int':
-                            params[param_name] = st.number_input(
-                                param_def.get('help', param_name),
-                                min_value=param_def['min'],
-                                max_value=param_def['max'],
-                                value=param_def['default'],
-                                key=param_key
-                            )
-                        elif param_def['type'] == 'float':
-                            format_str = "%.4f" if param_def.get('log', False) else "%.2f"
-                            params[param_name] = st.number_input(
-                                param_def.get('help', param_name),
-                                min_value=param_def['min'],
-                                max_value=param_def['max'],
-                                value=param_def['default'],
-                                format=format_str,
-                                key=param_key
-                            )
-                        elif param_def['type'] == 'select':
-                            options = param_def['options']
-                            default_idx = options.index(param_def['default'])
-                            params[param_name] = st.selectbox(
-                                param_def.get('help', param_name),
-                                options=options,
-                                index=default_idx,
-                                key=param_key
-                            )
-                        elif param_def['type'] == 'int_or_none':
-                            # Special handling for max_depth=None
-                            use_none = st.checkbox(f"{param_name} = None (unlimited)", value=param_def['default'] is None, key=f"{param_key}_none")
-                            if use_none:
-                                params[param_name] = None
-                            else:
+            for rec in coach_output.recommended_models:
+                if rec.model_key not in available_models:
+                    continue
+                    
+                spec = available_models[rec.model_key]
+                time_class = f"time-{rec.training_time.value}"
+                time_label = rec.training_time.value.title()
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    checkbox_key = f"train_model_{rec.model_key}"
+                    is_selected = st.checkbox(
+                        f"**{rec.model_name}** ",
+                        value=st.session_state.get(checkbox_key, False),
+                        key=checkbox_key
+                    )
+                    st.markdown(f'<span class="model-rationale">{rec.dataset_fit_summary}</span>', 
+                               unsafe_allow_html=True)
+                with col2:
+                    st.markdown(f'<span class="training-time-badge {time_class}">{time_label}</span>',
+                               unsafe_allow_html=True)
+                
+                if is_selected:
+                    models_to_train.append(rec.model_key)
+                    
+                    # Show hyperparameters
+                    if spec.hyperparam_schema:
+                        with st.expander(f"⚙️ {rec.model_name} Settings"):
+                            st.markdown(f"*{rec.rationale}*")
+                            params = {}
+                            for param_name, param_def in spec.hyperparam_schema.items():
+                                param_key = f"{rec.model_key}_{param_name}"
+                                if param_def['type'] == 'int':
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['default'],
+                                        key=param_key
+                                    )
+                                elif param_def['type'] == 'float':
+                                    format_str = "%.4f" if param_def.get('log', False) else "%.2f"
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['default'],
+                                        format=format_str,
+                                        key=param_key
+                                    )
+                                elif param_def['type'] == 'select':
+                                    options = param_def['options']
+                                    default_idx = options.index(param_def['default'])
+                                    params[param_name] = st.selectbox(
+                                        param_def.get('help', param_name),
+                                        options=options,
+                                        index=default_idx,
+                                        key=param_key
+                                    )
+                            selected_model_params[rec.model_key] = params
+                
+                st.markdown("---")
+        
+        # Worth Trying Tab
+        with tab_try:
+            st.markdown('<div class="bucket-header bucket-worth-trying">🔄 Worth Trying</div>', 
+                       unsafe_allow_html=True)
+            st.caption("These models may work but have some caveats for your data.")
+            
+            for rec in coach_output.worth_trying_models:
+                if rec.model_key not in available_models:
+                    continue
+                    
+                spec = available_models[rec.model_key]
+                
+                with st.expander(f"**{rec.model_name}** — {rec.dataset_fit_summary}"):
+                    st.markdown(f"*{rec.rationale}*")
+                    if rec.risks:
+                        st.warning("**Risks:** " + "; ".join(rec.risks[:2]))
+                    
+                    checkbox_key = f"train_model_{rec.model_key}"
+                    is_selected = st.checkbox(
+                        f"Select {rec.model_name} for training",
+                        value=st.session_state.get(checkbox_key, False),
+                        key=checkbox_key
+                    )
+                    
+                    if is_selected:
+                        models_to_train.append(rec.model_key)
+                        if spec.hyperparam_schema:
+                            params = {}
+                            for param_name, param_def in spec.hyperparam_schema.items():
+                                param_key = f"{rec.model_key}_{param_name}"
+                                if param_def['type'] == 'int':
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['default'],
+                                        key=param_key
+                                    )
+                                elif param_def['type'] == 'float':
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['default'],
+                                        format="%.4f",
+                                        key=param_key
+                                    )
+                                elif param_def['type'] == 'select':
+                                    options = param_def['options']
+                                    default_idx = options.index(param_def['default'])
+                                    params[param_name] = st.selectbox(
+                                        param_def.get('help', param_name),
+                                        options=options,
+                                        index=default_idx,
+                                        key=param_key
+                                    )
+                            selected_model_params[rec.model_key] = params
+        
+        # Not Recommended Tab
+        with tab_not:
+            st.markdown('<div class="bucket-header bucket-not-recommended">⛔ Not Recommended</div>', 
+                       unsafe_allow_html=True)
+            st.caption("These models are not well-suited for your current dataset. Use with caution.")
+            
+            for rec in coach_output.not_recommended_models:
+                if rec.model_key not in available_models:
+                    continue
+                    
+                spec = available_models[rec.model_key]
+                
+                with st.expander(f"**{rec.model_name}** — Why not recommended"):
+                    st.error(f"**Reason:** {rec.rationale}")
+                    if rec.risks:
+                        for risk in rec.risks[:3]:
+                            st.markdown(f"• ⚠️ {risk}")
+                    
+                    st.markdown(f"**When this model IS appropriate:** {rec.when_to_use}")
+                    
+                    checkbox_key = f"train_model_{rec.model_key}"
+                    is_selected = st.checkbox(
+                        f"Train anyway (not recommended)",
+                        value=st.session_state.get(checkbox_key, False),
+                        key=checkbox_key
+                    )
+                    
+                    if is_selected:
+                        models_to_train.append(rec.model_key)
+                        st.warning("⚠️ You've selected a model that may not perform well on your data.")
+    else:
+        # Fall through to family-based view
+        pass
+else:
+    model_view = "Model Family"  # Default to family view if no coach output
+
+# Family-based model selection (original view or when coach not available)
+if model_view == "Model Family" or not coach_output:
+    # Group models by group
+    model_groups = {}
+    for key, spec in available_models.items():
+        group = spec.group
+        if group not in model_groups:
+            model_groups[group] = []
+        model_groups[group].append((key, spec))
+
+    # Define advanced model groups
+    advanced_groups = ['Margin', 'Probabilistic']  # SVM, Naive Bayes, LDA
+
+    # Check if there are any advanced models available for the current task type
+    advanced_model_count = sum(
+        len(model_groups.get(group, [])) 
+        for group in advanced_groups 
+        if group in model_groups
+    )
+
+    # Advanced models toggle - only show if there are advanced models
+    if advanced_model_count > 0:
+        show_advanced = st.checkbox(
+            f"Show Advanced Models ({advanced_model_count} available)", 
+            value=st.session_state.get('show_advanced_models', False), 
+            key="show_advanced_models",
+            help="Advanced models include SVMs, Naive Bayes, and Linear Discriminant Analysis"
+        )
+    else:
+        show_advanced = False
+        st.caption("ℹ️ No advanced models available for this task type.")
+
+    model_config = ModelConfig()
+    models_to_train = []
+    selected_model_params = {}
+
+    # Display models by group
+    for group_name in sorted(model_groups.keys()):
+        if group_name in advanced_groups and not show_advanced:
+            continue
+        
+        st.subheader(f"{group_name} Models")
+        group_models = model_groups[group_name]
+        
+        for model_key, spec in group_models:
+            # Check if model is selected
+            checkbox_key = f"train_model_{model_key}"
+            is_selected = st.checkbox(
+                spec.name,
+                value=st.session_state.get(checkbox_key, False),
+                key=checkbox_key,
+                help=", ".join(spec.capabilities.notes) if spec.capabilities.notes else None
+            )
+            
+            if is_selected:
+                models_to_train.append(model_key)
+                
+                # Hyperparameter controls
+                if spec.hyperparam_schema:
+                    with st.expander(f"{spec.name} Hyperparameters"):
+                        params = {}
+                        for param_name, param_def in spec.hyperparam_schema.items():
+                            param_key = f"{model_key}_{param_name}"
+                            if param_def['type'] == 'int':
                                 params[param_name] = st.number_input(
                                     param_def.get('help', param_name),
                                     min_value=param_def['min'],
                                     max_value=param_def['max'],
-                                    value=param_def['min'] if param_def['default'] is None else param_def['default'],
+                                    value=param_def['default'],
                                     key=param_key
                                 )
-                    
-                    selected_model_params[model_key] = params
+                            elif param_def['type'] == 'float':
+                                format_str = "%.4f" if param_def.get('log', False) else "%.2f"
+                                params[param_name] = st.number_input(
+                                    param_def.get('help', param_name),
+                                    min_value=param_def['min'],
+                                    max_value=param_def['max'],
+                                    value=param_def['default'],
+                                    format=format_str,
+                                    key=param_key
+                                )
+                            elif param_def['type'] == 'select':
+                                options = param_def['options']
+                                default_idx = options.index(param_def['default'])
+                                params[param_name] = st.selectbox(
+                                    param_def.get('help', param_name),
+                                    options=options,
+                                    index=default_idx,
+                                    key=param_key
+                                )
+                            elif param_def['type'] == 'int_or_none':
+                                # Special handling for max_depth=None
+                                use_none = st.checkbox(f"{param_name} = None (unlimited)", value=param_def['default'] is None, key=f"{param_key}_none")
+                                if use_none:
+                                    params[param_name] = None
+                                else:
+                                    params[param_name] = st.number_input(
+                                        param_def.get('help', param_name),
+                                        min_value=param_def['min'],
+                                        max_value=param_def['max'],
+                                        value=param_def['min'] if param_def['default'] is None else param_def['default'],
+                                        key=param_key
+                                    )
+                        
+                        selected_model_params[model_key] = params
 
 st.session_state.model_config = model_config
 
