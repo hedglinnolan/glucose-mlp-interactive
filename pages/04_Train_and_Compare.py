@@ -325,9 +325,10 @@ if coach_recs:
         st.markdown("**Based on your data, try these models first:**")
         for idx, rec in enumerate(coach_recs[:3]):  # Top 3
             with st.container():
-                # Use priority and index to make unique title/keys
+                # Use display_name for consistent naming
+                display_name = rec.display_name if hasattr(rec, 'display_name') else f"{rec.group} Models"
                 priority_label = "High" if rec.priority <= 2 else "Medium"
-                st.markdown(f"### {rec.group} Models ({priority_label} Priority)")
+                st.markdown(f"### {display_name} ({priority_label} Priority)")
                 
                 # Show readiness checks if any
                 if hasattr(rec, 'readiness_checks') and rec.readiness_checks:
@@ -336,11 +337,11 @@ if coach_recs:
                         st.write(f"• {check}")
                 
                 st.markdown("**Why:**")
-                for reason in rec.why:
+                for reason in rec.why[:5]:  # Limit to 5 reasons
                     st.write(f"• {reason}")
                 if rec.when_not_to_use:
                     st.markdown("**When not to use:**")
-                    for caveat in rec.when_not_to_use:
+                    for caveat in rec.when_not_to_use[:3]:  # Limit to 3
                         st.write(f"• {caveat}")
                 if rec.suggested_preprocessing:
                     st.markdown("**Suggested preprocessing:**")
@@ -349,11 +350,11 @@ if coach_recs:
                 
                 # Auto-select button with unique key (include priority and index)
                 button_key = f"coach_select_{rec.group}_p{rec.priority}_i{idx}"
-                if st.button(f"Select {rec.group} models", key=button_key):
+                if st.button(f"Select {display_name}", key=button_key):
                     # Store recommended models in session_state
                     for model_key in rec.recommended_models:
                         st.session_state[f'train_model_{model_key}'] = True
-                    st.success(f"✅ Selected {len(rec.recommended_models)} {rec.group} models")
+                    st.success(f"✅ Selected {len(rec.recommended_models)} {display_name}")
                     st.rerun()
 
 # Model selection and configuration

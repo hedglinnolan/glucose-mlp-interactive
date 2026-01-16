@@ -64,7 +64,57 @@ else:
 
 # Model Selection Coach (at top, before EDA recommendations)
 st.header("🎓 Model Selection Coach")
-st.markdown("**Based on your dataset characteristics, here are recommended model families to try:**")
+
+# Custom CSS for coach cards
+st.markdown("""
+<style>
+.coach-card {
+    border: 1px solid #e0e0e0;
+    border-radius: 10px;
+    padding: 1rem;
+    margin-bottom: 0.5rem;
+    background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+}
+.coach-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+.coach-priority-high {
+    background-color: #d4edda;
+    color: #155724;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+.coach-priority-medium {
+    background-color: #fff3cd;
+    color: #856404;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+.coach-models-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+.coach-model-tag {
+    background-color: #e7f3ff;
+    color: #0066cc;
+    padding: 4px 10px;
+    border-radius: 15px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("**Based on your dataset characteristics, here are recommended model families:**")
 
 # Compute signals for coach
 signals = compute_dataset_signals(
@@ -77,35 +127,62 @@ coach_recs = coach_recommendations(
 )
 
 if coach_recs:
-    for idx, rec in enumerate(coach_recs[:3]):  # Top 3 recommendations
-        with st.container():
-            # Use priority label for clarity
+    # Summary row with priority badges
+    cols = st.columns(min(len(coach_recs), 3))
+    for idx, rec in enumerate(coach_recs[:3]):
+        with cols[idx]:
             priority_label = "High" if rec.priority <= 2 else "Medium"
-            st.markdown(f"### {rec.group} Models ({priority_label} Priority)")
-            
-            # Show readiness checks if any
+            priority_class = "coach-priority-high" if rec.priority <= 2 else "coach-priority-medium"
+            display_name = rec.display_name if hasattr(rec, 'display_name') else f"{rec.group} Models"
+            st.markdown(f"""
+            <div class="coach-card">
+                <div class="coach-card-header">
+                    <strong>{display_name}</strong>
+                    <span class="{priority_class}">{priority_label}</span>
+                </div>
+                <div class="coach-models-list">
+                    {''.join([f'<span class="coach-model-tag">{m}</span>' for m in rec.recommended_models[:4]])}
+                    {f'<span class="coach-model-tag">+{len(rec.recommended_models)-4} more</span>' if len(rec.recommended_models) > 4 else ''}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    st.markdown("")  # spacing
+    
+    # Expandable details for each recommendation
+    for idx, rec in enumerate(coach_recs[:3]):
+        display_name = rec.display_name if hasattr(rec, 'display_name') else f"{rec.group} Models"
+        with st.expander(f"📋 {display_name} — Details & Recommendations", expanded=(idx == 0)):
+            # Readiness checks at the top if any
             if hasattr(rec, 'readiness_checks') and rec.readiness_checks:
-                st.warning("⚠️ **Recommended prerequisites:**")
+                st.warning("⚠️ **Recommended prerequisites before training:**")
                 for check in rec.readiness_checks:
-                    st.write(f"• {check}")
+                    st.markdown(f"• {check}")
             
-            st.markdown("**Why:**")
-            for reason in rec.why:
-                st.write(f"• {reason}")
-            if rec.when_not_to_use:
-                st.markdown("**When not to use:**")
-                for caveat in rec.when_not_to_use:
-                    st.write(f"• {caveat}")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**✅ Why this family:**")
+                for reason in rec.why[:5]:  # Limit to top 5 reasons
+                    st.markdown(f"• {reason}")
+            
+            with col2:
+                st.markdown("**⚠️ When to be cautious:**")
+                if rec.when_not_to_use:
+                    for caveat in rec.when_not_to_use[:3]:  # Limit to top 3
+                        st.markdown(f"• {caveat}")
+                else:
+                    st.markdown("• No major caveats for this dataset")
+            
             if rec.suggested_preprocessing:
-                st.markdown("**Suggested preprocessing:**")
-                for prep in rec.suggested_preprocessing:
-                    st.write(f"• {prep}")
+                st.markdown("**🔧 Suggested preprocessing:**")
+                prep_text = " → ".join(rec.suggested_preprocessing)
+                st.info(prep_text)
             
-            # Show recommended models
-            st.markdown(f"**Recommended models:** {', '.join(rec.recommended_models)}")
-            st.markdown("---")
+            # All recommended models
+            st.markdown(f"**🎯 Models to try:** `{', '.join(rec.recommended_models)}`")
 else:
-    st.info("Complete EDA analyses to get more specific model recommendations.")
+    st.info("💡 Complete EDA analyses below to get more specific model recommendations.")
 
 # Initialize EDA results storage
 if 'eda_results' not in st.session_state:

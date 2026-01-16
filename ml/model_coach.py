@@ -6,16 +6,33 @@ from typing import List, Optional, Dict, Any
 from ml.eda_recommender import DatasetSignals
 
 
+# Canonical group display names
+GROUP_DISPLAY_NAMES = {
+    'Linear': 'Linear Models',
+    'Trees': 'Tree-Based Models',
+    'Boosting': 'Gradient Boosting',
+    'Distance': 'Distance-Based Models',
+    'Margin': 'Margin-Based Models (SVM)',
+    'Probabilistic': 'Probabilistic Models',
+    'Neural Net': 'Neural Networks'
+}
+
+
 @dataclass
 class CoachRecommendation:
     """A recommendation from the model selection coach."""
-    group: str  # e.g., "Linear", "Boosting", "Trees", "Distance", "Neural Net"
+    group: str  # Canonical group key (e.g., "Linear", "Trees")
     recommended_models: List[str]  # Model keys from registry
     why: List[str]  # Plain language reasons with numbers
     when_not_to_use: List[str]  # Short caveats
     suggested_preprocessing: List[str]  # e.g., "standardize numeric features", "consider PCA"
     priority: int  # Lower = higher priority
     readiness_checks: List[str] = field(default_factory=list)  # Prerequisites that should be completed first
+    
+    @property
+    def display_name(self) -> str:
+        """Get the display name for this group."""
+        return GROUP_DISPLAY_NAMES.get(self.group, self.group)
 
 
 def coach_recommendations(
@@ -91,22 +108,6 @@ def coach_recommendations(
             priority=1,
             readiness_checks=readiness_checks[:2] if readiness_checks else []
         ))
-        
-        # Also recommend trees/boosting for robustness
-        if outlier_rate > 0.05:
-            recommendations.append(CoachRecommendation(
-                group='Trees',
-                recommended_models=['rf', 'extratrees_reg'],
-                why=[
-                    f"Outlier rate: {outlier_rate:.1%} - tree models are robust to outliers",
-                    "Trees handle non-normal distributions well"
-                ],
-                when_not_to_use=[
-                    "If interpretability is critical (trees are less interpretable)"
-                ],
-                suggested_preprocessing=[],
-                priority=3
-            ))
     
     # Class imbalance (classification)
     if task_type == 'classification':
@@ -252,7 +253,65 @@ def coach_recommendations(
             priority=5
         ))
     
-    # Sort by priority
-    recommendations.sort(key=lambda x: x.priority)
+    # Merge recommendations by group to avoid duplicates
+    merged = _merge_recommendations_by_group(recommendations)
     
-    return recommendations
+    # Sort by priority
+    merged.sort(key=lambda x: x.priority)
+    
+    return merged
+
+
+def _merge_recommendations_by_group(recommendations: List[CoachRecommendation]) -> List[CoachRecommendation]:
+    """
+    Merge recommendations with the same group into a single recommendation.
+    Combines models, reasons, caveats, and preprocessing suggestions.
+    Uses the lowest (best) priority from merged recommendations.
+    """
+    group_map: Dict[str, CoachRecommendation] = {}
+    
+    for rec in recommendations:
+        if rec.group not in group_map:
+            # First recommendation for this group - copy it
+            group_map[rec.group] = CoachRecommendation(
+                group=rec.group,
+                recommended_models=list(rec.recommended_models),
+                why=list(rec.why),
+                when_not_to_use=list(rec.when_not_to_use),
+                suggested_preprocessing=list(rec.suggested_preprocessing),
+                priority=rec.priority,
+                readiness_checks=list(rec.readiness_checks)
+            )
+        else:
+            # Merge into existing recommendation
+            existing = group_map[rec.group]
+            
+            # Add unique models
+            for model in rec.recommended_models:
+                if model not in existing.recommended_models:
+                    existing.recommended_models.append(model)
+            
+            # Add unique reasons
+            for reason in rec.why:
+                if reason not in existing.why:
+                    existing.why.append(reason)
+            
+            # Add unique caveats
+            for caveat in rec.when_not_to_use:
+                if caveat not in existing.when_not_to_use:
+                    existing.when_not_to_use.append(caveat)
+            
+            # Add unique preprocessing suggestions
+            for prep in rec.suggested_preprocessing:
+                if prep not in existing.suggested_preprocessing:
+                    existing.suggested_preprocessing.append(prep)
+            
+            # Add unique readiness checks
+            for check in rec.readiness_checks:
+                if check not in existing.readiness_checks:
+                    existing.readiness_checks.append(check)
+            
+            # Use the lowest (best) priority
+            existing.priority = min(existing.priority, rec.priority)
+    
+    return list(group_map.values())
