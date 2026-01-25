@@ -861,6 +861,23 @@ def _generate_preprocessing_recommendations(profile: Any) -> List[PreprocessingR
             how_to_implement="Try log transform for right-skewed data, or power transforms (Box-Cox, Yeo-Johnson)."
         ))
     
+    # Interpretability vs performance tradeoff (always surface)
+    recs.append(PreprocessingRecommendation(
+        step_name="Interpretability vs Performance",
+        step_key="interpretability_tradeoff",
+        rationale="Preprocessing choices affect both model accuracy and explainability",
+        priority="optional",
+        affected_model_families=["All Models"],
+        plain_language_explanation=(
+            "**Interpretability-focused:** Keeps pipelines simple (no log transform, PCA, or KMeans features). "
+            "Coefficients and feature importances stay meaningful. Best when you need to explain results to stakeholders. "
+            "**Performance-focused:** Allows log transforms, PCA, and cluster-based features. Often improves accuracy "
+            "but obscures direct feature–outcome relationships. Use when prediction quality matters most."
+        ),
+        how_to_implement="Set 'Interpretability preference' in Preprocessing to High (interpretability), Balanced, or Performance. "
+                        "High disables log transform, PCA, and KMeans; Performance keeps them available."
+    ))
+
     # Class imbalance
     if profile.target_profile and profile.target_profile.is_imbalanced:
         severity = profile.target_profile.imbalance_severity

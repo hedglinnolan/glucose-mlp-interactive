@@ -1,6 +1,6 @@
 #!/bin/bash
-# Run script for macOS/Linux
-# This script activates the virtual environment and runs the Streamlit app
+# Run script for macOS/Linux (uses uv)
+# Activates the virtual environment and runs the Streamlit app
 
 echo "🚀 Starting Regression Model Trainer..."
 
@@ -11,21 +11,15 @@ if [ ! -d ".venv" ]; then
     exit 1
 fi
 
-# Activate virtual environment
-echo "🔌 Activating virtual environment..."
-source .venv/bin/activate
-
-# Check if streamlit is installed
-python -c "import streamlit" 2>&1
-if [ $? -ne 0 ]; then
-    echo "❌ Streamlit not found in virtual environment!"
-    echo "Installing dependencies..."
-    pip install -r requirements.txt
+# Check for uv
+if ! command -v uv &> /dev/null; then
+    echo "❌ uv not found! Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
 fi
 
-# Run the app
+# Run the app (uv run uses .venv automatically)
 echo "🌐 Starting Streamlit app..."
 echo "The app will open in your browser at http://localhost:8501"
 echo ""
 
-streamlit run app.py
+uv run streamlit run app.py

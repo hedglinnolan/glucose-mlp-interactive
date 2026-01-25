@@ -2,6 +2,8 @@
 
 A comprehensive, educational machine learning modeling platform built with Streamlit. Upload your data, explore it, build preprocessing pipelines, train multiple models, understand their behavior, and export detailed reports—all with consistent preprocessing and honest evaluation.
 
+Optionally use a local LLM ([Ollama](https://ollama.ai)) to generate human-readable interpretations of EDA, model diagnostics, and explainability results.
+
 ## 📋 Table of Contents
 
 - [Installation](#installation)
@@ -16,7 +18,8 @@ A comprehensive, educational machine learning modeling platform built with Strea
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- **Python 3.8 or 3.9** (3.10+ not supported: `llvmlite`/`numba`/`shap` require &lt;3.10)
+- **uv** (recommended): [Install uv](https://docs.astral.sh/uv/getting-started/installation/) — fast Python package installer
 - 4GB RAM minimum (8GB recommended)
 - Internet connection for first-time dependency installation
 
@@ -24,7 +27,9 @@ A comprehensive, educational machine learning modeling platform built with Strea
 
 **Windows:**
 ```powershell
-# Run setup script (creates venv and installs dependencies)
+# Install uv (one-time): irm https://astral.sh/uv/install.ps1 | iex
+
+# Run setup script (creates venv and installs dependencies via uv)
 .\setup.ps1
 
 # Run the app
@@ -33,6 +38,8 @@ A comprehensive, educational machine learning modeling platform built with Strea
 
 **macOS/Linux:**
 ```bash
+# Install uv (one-time): curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Make scripts executable
 chmod +x setup.sh run.sh
 
@@ -43,22 +50,16 @@ chmod +x setup.sh run.sh
 ./run.sh
 ```
 
-**Manual Setup:**
+**Manual Setup (with uv):**
 ```bash
-# Create virtual environment
-python -m venv .venv
-
-# Activate (Windows)
-.\.venv\Scripts\Activate.ps1
-
-# Activate (macOS/Linux)
-source .venv/bin/activate
+# Create virtual environment (Python 3.9; 3.10+ breaks llvmlite/shap)
+uv venv --python 3.9
 
 # Install dependencies
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 
 # Run the app
-streamlit run app.py
+uv run streamlit run app.py
 ```
 
 The app will open in your browser at `http://localhost:8501`
@@ -70,7 +71,7 @@ The app will open in your browser at `http://localhost:8501`
 3. **Explore**: Review data audit and EDA visualizations
 4. **Preprocess**: Build a preprocessing pipeline
 5. **Train**: Train multiple models and compare performance
-6. **Explain**: Understand model behavior with feature importance
+6. **Explain**: Understand model behavior with feature importance. Optional: use **Interpret these results using an LLM** to get AI-generated interpretations where available.
 7. **Export**: Download comprehensive reports
 
 ## 🎯 Happy Path Walkthrough
@@ -149,6 +150,7 @@ The app will open in your browser at `http://localhost:8501`
 4. Click **"Calculate Partial Dependence"**
 5. Review partial dependence plots for top features
 6. Optionally enable SHAP analysis (requires shap package)
+7. Use **Interpret these results using an LLM** (optional) for narrative summaries of permutation importance, partial dependence, and SHAP.
 
 **Expected Output**: Understanding of which features matter most
 
@@ -209,6 +211,15 @@ The app will open in your browser at `http://localhost:8501`
 - Partial dependence plots
 - Optional SHAP analysis (gracefully handles missing package)
 
+### Optional: LLM-Powered Interpretations
+- **Local LLM via [Ollama](https://ollama.ai)**. "Interpret these results using an LLM" buttons appear in EDA, Train & Compare (diagnostics), and Explainability (permutation importance, partial dependence, SHAP, robustness, Bland–Altman).
+- **Optional:** The app runs fully without it. Buttons are always shown; if Ollama is unavailable, a short message explains how to enable it.
+- **How to enable:**
+  1. Install [Ollama](https://ollama.ai).
+  2. Run `ollama serve` (or ensure it is already running).
+  3. Pull a model, e.g. `ollama run qwen2.5:7b` (default used by the app).
+- **Report Export:** Optional "Include LLM interpretations" checkbox when downloading the report.
+
 ### Report Export
 - Comprehensive markdown report
 - Includes: dataset summary, audit, splits, preprocessing, hyperparameters, metrics, feature importance
@@ -234,18 +245,29 @@ glucose-mlp-interactive/
 │   └── rf.py             # Random Forest
 ├── ml/                    # ML utilities
 │   ├── pipeline.py       # Preprocessing pipeline builder
-│   └── eval.py           # Evaluation metrics and CV
+│   ├── eval.py           # Evaluation metrics and CV
+│   ├── llm_local.py      # Optional Ollama integration for LLM interpretations
+│   ├── plot_narrative.py # Narrative generators for plots
+│   ├── preprocess_operators.py
+│   ├── outliers.py
+│   ├── physiology_reference.py
+│   ├── eda_actions.py
+│   ├── eda_recommender.py
+│   └── dataset_profile.py
 ├── utils/                 # Utilities
-│   └── session_state.py  # Session state management
+│   ├── session_state.py  # Session state management
+│   └── llm_ui.py         # "Interpret with LLM" button and context builder
 └── [existing files]      # data_processor.py, visualizations.py, etc.
 ```
+
+See repo for full layout.
 
 ### Key Design Principles
 
 - **Consistent Preprocessing**: All models use the same preprocessing pipeline
 - **Honest Evaluation**: Proper train/val/test splits with optional CV
 - **Modular Architecture**: Clean separation of concerns
-- **Production Quality**: Type hints, docstrings, error handling
+- **Code quality**: Type hints, docstrings, error handling. Optional dependencies (SHAP, LLM via Ollama) degrade gracefully when unavailable. `scripts/smoke_check.py` validates imports and core behavior.
 - **Educational Focus**: Clear explanations and visualizations
 
 ## ⚠️ Known Limitations & Assumptions
@@ -274,6 +296,7 @@ glucose-mlp-interactive/
 
 ### Technical Limitations
 - **SHAP**: Optional dependency; app works without it
+- **LLM (Ollama)**: Optional. Requires Ollama installed and `ollama serve` running. Default model `qwen2.5:7b`; configurable via app. No cloud APIs; entirely local.
 - **Plotly**: Some complex plots may be slow with very large datasets
 - **Session state**: Data persists only during session (refresh clears state)
 
@@ -288,7 +311,7 @@ glucose-mlp-interactive/
 - Use `.\run.ps1` (Windows) or `./run.sh` (macOS/Linux) which handles this automatically
 
 ### Import errors
-- **Solution**: Run `pip install -r requirements.txt` in activated venv
+- **Solution**: Run `uv pip install -r requirements.txt` in project root (with uv) or `pip install -r requirements.txt` in activated venv
 
 ### Memory errors
 - **Solution**: Reduce dataset size, use fewer features, or reduce model complexity
@@ -300,6 +323,21 @@ glucose-mlp-interactive/
 
 ### SHAP not working
 - **Solution**: Install with `pip install shap` (optional dependency)
+
+### LLM / Ollama interpretations not working
+- **Symptom:** "Interpret these results using an LLM" shows setup instructions or an error.
+- **Fix:**
+  1. Install Ollama from [ollama.ai](https://ollama.ai).
+  2. Run `ollama serve` in a terminal (and keep it running).
+  3. Pull a model, e.g. `ollama run qwen2.5:7b`.
+- **Note:** The app works fully without Ollama; this only affects the optional LLM feature.
+
+### `uv pip install` fails with `llvmlite` / "only versions >=3.6,<3.10 are supported"
+- **Cause**: The project venv uses Python 3.10+; `llvmlite` (used by `numba`/`shap`) supports only Python &lt;3.10.
+- **Solution**: Use Python 3.9. Remove the venv and re-run setup so it creates a 3.9 venv:
+  - **macOS/Linux**: `rm -rf .venv && ./setup.sh`
+  - **Windows**: `Remove-Item -Recurse -Force .venv; .\setup.ps1`
+  - Setup creates `.venv` with `uv venv --python 3.9` and installs deps.
 
 ### Blank pages
 - **Solution**: Check browser console (F12) for JavaScript errors

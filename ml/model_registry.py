@@ -28,6 +28,7 @@ class ModelCapabilities:
     supports_shap: Literal["none", "linear", "tree", "kernel"]
     requires_scaled_numeric: bool
     recommended_for_high_dim: bool
+    interpretability_tier: Literal["high", "medium", "low"] = "medium"
     notes: list[str] = field(default_factory=list)
 
 
@@ -155,6 +156,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='linear',
             requires_scaled_numeric=True,
             recommended_for_high_dim=True,
+            interpretability_tier="high",
             notes=['L2 regularization prevents overfitting', 'Good for multicollinearity']
         )
     )
@@ -176,6 +178,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='linear',
             requires_scaled_numeric=True,
             recommended_for_high_dim=True,
+            interpretability_tier="high",
             notes=['L1 regularization performs feature selection', 'Can zero out coefficients']
         )
     )
@@ -198,6 +201,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='linear',
             requires_scaled_numeric=True,
             recommended_for_high_dim=True,
+            interpretability_tier="high",
             notes=['Combines L1 and L2 regularization', 'Balances feature selection and stability']
         )
     )
@@ -222,6 +226,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='linear',
             requires_scaled_numeric=True,
             recommended_for_high_dim=True,
+            interpretability_tier="high",
             notes=['Interpretable coefficients', 'Good baseline for classification']
         )
     )
@@ -482,6 +487,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='kernel',
             requires_scaled_numeric=True,
             recommended_for_high_dim=True,
+            interpretability_tier="low",
             notes=['Deep learning', 'Can capture complex patterns', 'Requires more data']
         )
     )
@@ -501,6 +507,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='linear',
             requires_scaled_numeric=False,
             recommended_for_high_dim=False,
+            interpretability_tier="high",
             notes=['Simple baseline', 'Interpretable', 'Sensitive to outliers']
         )
     )
@@ -523,6 +530,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='linear',
             requires_scaled_numeric=False,
             recommended_for_high_dim=False,
+            interpretability_tier="high",
             notes=['Robust to outliers', 'Regression only', 'Less sensitive than OLS']
         )
     )
@@ -546,6 +554,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='tree',
             requires_scaled_numeric=False,
             recommended_for_high_dim=False,
+            interpretability_tier="medium",
             notes=['Robust ensemble', 'Handles missing values', 'Feature importance available']
         )
     )

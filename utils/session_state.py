@@ -113,6 +113,8 @@ def init_session_state():
         # Preprocessing
         'preprocessing_pipeline': None,
         'preprocessing_config': None,
+        'preprocessing_pipelines_by_model': {},
+        'preprocessing_config_by_model': {},
         
         # Splits
         'split_config': SplitConfig(),
@@ -123,6 +125,7 @@ def init_session_state():
         'y_val': None,
         'y_test': None,
         'feature_names': None,
+        'feature_names_by_model': {},
         
         # Models
         'model_config': ModelConfig(),
@@ -139,7 +142,8 @@ def init_session_state():
         # Explainability
         'permutation_importance': {},
         'partial_dependence': {},
-        
+        'explainability_robustness': {},
+
         # EDA
         'eda_results': {},  # Dict[str, Dict] - recommendation_id -> results
         'eda_insights': [],  # List[Dict] - structured insights from EDA analyses
@@ -150,6 +154,9 @@ def init_session_state():
         # Global settings
         'random_seed': 42,  # Global random seed
         'data_source': None,  # Track data source (uploaded CSV, built-in dataset, etc.)
+        'data_filename': None,  # Track filename for uploads or dataset label
+        'dataset_id': None,  # Incrementing dataset identifier
+        'dataset_history': [],  # Archive of replaced datasets (metadata only)
     }
     
     for key, value in defaults.items():
@@ -167,8 +174,50 @@ def set_data(df: pd.DataFrame):
     st.session_state.raw_data = df
 
 
-def get_preprocessing_pipeline() -> Optional[Pipeline]:
+def reset_data_dependent_state():
+    """Reset state that depends on the active dataset."""
+    st.session_state.data_config = DataConfig()
+    st.session_state.data_audit = None
+    st.session_state.task_type_detection = TaskTypeDetection()
+    st.session_state.cohort_structure_detection = CohortStructureDetection()
+
+    st.session_state.preprocessing_pipeline = None
+    st.session_state.preprocessing_config = None
+    st.session_state.preprocessing_pipelines_by_model = {}
+    st.session_state.preprocessing_config_by_model = {}
+
+    st.session_state.X_train = None
+    st.session_state.X_val = None
+    st.session_state.X_test = None
+    st.session_state.y_train = None
+    st.session_state.y_val = None
+    st.session_state.y_test = None
+    st.session_state.feature_names = None
+    st.session_state.feature_names_by_model = {}
+
+    st.session_state.trained_models = {}
+    st.session_state.model_results = {}
+    st.session_state.fitted_estimators = {}
+    st.session_state.fitted_preprocessing_pipelines = {}
+
+    st.session_state.cv_results = None
+    st.session_state.use_cv = False
+    st.session_state.cv_folds = 5
+
+    st.session_state.permutation_importance = {}
+    st.session_state.partial_dependence = {}
+    st.session_state.explainability_robustness = {}
+    st.session_state.eda_results = {}
+    st.session_state.eda_insights = []
+    st.session_state.report_data = None
+
+
+def get_preprocessing_pipeline(model_key: Optional[str] = None) -> Optional[Pipeline]:
     """Get preprocessing pipeline from session state."""
+    if model_key:
+        pipelines = st.session_state.get('preprocessing_pipelines_by_model', {})
+        if model_key in pipelines:
+            return pipelines[model_key]
     return st.session_state.get('preprocessing_pipeline')
 
 
@@ -176,6 +225,17 @@ def set_preprocessing_pipeline(pipeline: Pipeline, config: Dict[str, Any]):
     """Set preprocessing pipeline and config."""
     st.session_state.preprocessing_pipeline = pipeline
     st.session_state.preprocessing_config = config
+
+
+def set_preprocessing_pipelines(pipelines_by_model: Dict[str, Pipeline], configs_by_model: Dict[str, Any], base_config: Dict[str, Any]):
+    """Set model-specific preprocessing pipelines and configs."""
+    st.session_state.preprocessing_pipelines_by_model = pipelines_by_model
+    st.session_state.preprocessing_config_by_model = configs_by_model
+    # Preserve a default pipeline for legacy access
+    default_pipeline = pipelines_by_model.get('default') or next(iter(pipelines_by_model.values()), None)
+    if default_pipeline:
+        st.session_state.preprocessing_pipeline = default_pipeline
+    st.session_state.preprocessing_config = base_config
 
 
 def get_splits() -> Optional[tuple]:

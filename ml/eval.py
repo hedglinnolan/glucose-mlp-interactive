@@ -136,3 +136,194 @@ def analyze_residuals(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
         'max_residual': float(np.max(residuals)),
         'median_residual': float(np.median(residuals))
     }
+
+
+def analyze_residuals_extended(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
+    """
+    Extended residual stats for narrative: skew, IQR, residuals-vs-predicted
+    correlation, quantiles.
+    """
+    from scipy.stats import skew as scipy_skew
+
+    residuals = np.asarray(y_true - y_pred, dtype=float).ravel()
+    y_pred_arr = np.asarray(y_pred, dtype=float).ravel()
+    valid = np.isfinite(residuals) & np.isfinite(y_pred_arr)
+    if valid.sum() < 3:
+        return {}
+
+    r = residuals[valid]
+    p = y_pred_arr[valid]
+    q5, q25, q75, q95 = float(np.percentile(r, 5)), float(np.percentile(r, 25)), float(np.percentile(r, 75)), float(np.percentile(r, 95))
+    iqr = float(q75 - q25)
+    sk = float(scipy_skew(r)) if len(r) >= 3 else 0.0
+    rr = np.corrcoef(r, p)[0, 1] if np.std(r) > 0 and np.std(p) > 0 else 0.0
+    resid_vs_pred_corr = float(rr) if not np.isnan(rr) else 0.0
+
+    return {
+        'residuals': residuals,
+        'mean_residual': float(np.mean(r)),
+        'std_residual': float(np.std(r)),
+        'min_residual': float(np.min(r)),
+        'max_residual': float(np.max(r)),
+        'median_residual': float(np.median(r)),
+        'skew': sk,
+        'iqr': iqr,
+        'q5': q5,
+        'q25': q25,
+        'q75': q75,
+        'q95': q95,
+        'residual_vs_predicted_corr': resid_vs_pred_corr,
+    }
+
+
+def analyze_pred_vs_actual(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
+    """
+    Stats for predictions-vs-actual narrative: correlation, bias by quintile,
+    max over/under-prediction.
+    """
+    y_true_arr = np.asarray(y_true, dtype=float).ravel()
+    y_pred_arr = np.asarray(y_pred, dtype=float).ravel()
+    valid = np.isfinite(y_true_arr) & np.isfinite(y_pred_arr)
+    if valid.sum() < 3:
+        return {}
+
+    yt, yp = y_true_arr[valid], y_pred_arr[valid]
+    corr = np.corrcoef(yt, yp)[0, 1] if np.std(yt) > 0 and np.std(yp) > 0 else 0.0
+    corr = float(corr) if not np.isnan(corr) else 0.0
+
+    q_edges = np.percentile(yt, [0, 20, 40, 60, 80, 100])
+    q_edges[-1] += 1e-9
+    bias_by_quintile = []
+    for i in range(5):
+        mask = (yt >= q_edges[i]) & (yt < q_edges[i + 1])
+        if mask.sum() > 0:
+            b = float(np.mean(yp[mask] - yt[mask]))
+        else:
+            b = 0.0
+        bias_by_quintile.append(b)
+
+    err = yp - yt
+    max_over = float(np.max(err)) if len(err) else 0.0
+    max_under = float(np.min(err)) if len(err) else 0.0
+
+    return {
+        'correlation': corr,
+        'bias_by_quintile': bias_by_quintile,
+        'max_overprediction': max_over,
+        'max_underprediction': max_under,
+        'mean_error': float(np.mean(err)),
+    }
+
+
+def analyze_confusion_matrix(
+    y_true: np.ndarray, y_pred: np.ndarray, labels: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Per-class precision/recall and top confusion pairs for narrative.
+    """
+    from sklearn.metrics import precision_score, recall_score
+
+    yt = np.asarray(y_true).ravel()
+    yp = np.asarray(y_pred).ravel()
+    uniq = np.unique(np.concatenate([yt, yp]))
+    if len(uniq) < 2:
+        return {}
+
+    cm = confusion_matrix(yt, yp, labels=uniq)
+    n = cm.shape[0]
+    prec = precision_score(yt, yp, average=None, zero_division=0, labels=uniq)
+    rec = recall_score(yt, yp, average=None, zero_division=0, labels=uniq)
+    per_class = []
+    for i in range(n):
+        per_class.append({
+            'label': labels[i] if labels and i < len(labels) else str(uniq[i]),
+            'precision': float(prec[i]),
+            'recall': float(rec[i]),
+        })
+
+    flat = []
+    for i in range(n):
+        for j in range(n):
+            if i != j and cm[i, j] > 0:
+                flat.append((int(cm[i, j]), int(i), int(j)))
+    flat.sort(reverse=True)
+    top_confusions = [(c, str(uniq[i]), str(uniq[j])) for c, i, j in flat[:5]]
+
+    return {
+        'confusion_matrix': cm,
+        'per_class': per_class,
+        'top_confusions': top_confusions,
+        'labels': [str(x) for x in uniq],
+    }
+
+
+def analyze_bland_altman(a: np.ndarray, b: np.ndarray) -> Dict[str, Any]:
+    """
+    Stats for Bland–Altman narrative: mean difference, LoA, proportion outside LoA.
+    """
+    a = np.asarray(a, dtype=float).ravel()
+    b = np.asarray(b, dtype=float).ravel()
+    valid = np.isfinite(a) & np.isfinite(b)
+    if valid.sum() < 2:
+        return {}
+    a, b = a[valid], b[valid]
+    diff = a - b
+    mean_diff = float(np.mean(diff))
+    std_diff = float(np.std(diff))
+    if std_diff == 0:
+        return {}
+    loa_low = mean_diff - 1.96 * std_diff
+    loa_high = mean_diff + 1.96 * std_diff
+    n_out = np.sum((diff < loa_low) | (diff > loa_high))
+    return {
+        'mean_diff': mean_diff,
+        'std_diff': std_diff,
+        'loa_low': loa_low,
+        'loa_high': loa_high,
+        'width_loa': loa_high - loa_low,
+        'n': int(len(diff)),
+        'n_outside_loa': int(n_out),
+        'pct_outside_loa': float(n_out / len(diff)),
+    }
+
+
+def compare_importance_ranks(
+    model_names: List[str],
+    perm_importance_dict: Dict[str, Dict[str, Any]],
+    feature_names_by_model: Dict[str, List[str]],
+    top_k: int = 5
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """
+    Compare permutation importance rankings across models.
+    Only compares pairs that share the same feature set (e.g. same pipeline).
+    
+    Returns:
+        Dict mapping (model_a, model_b) -> {spearman, top_k_overlap, n_features}
+    """
+    from scipy.stats import spearmanr
+    
+    results = {}
+    for i, ma in enumerate(model_names):
+        for mb in model_names[i + 1:]:
+            if ma not in perm_importance_dict or mb not in perm_importance_dict:
+                continue
+            fa = feature_names_by_model.get(ma)
+            fb = feature_names_by_model.get(mb)
+            if fa is None or fb is None or len(fa) != len(fb) or fa != fb:
+                continue
+            imp_a = perm_importance_dict[ma]['importances_mean']
+            imp_b = perm_importance_dict[mb]['importances_mean']
+            if len(imp_a) != len(imp_b) or len(imp_a) == 0:
+                continue
+            r, p = spearmanr(imp_a, imp_b)
+            top_a = set(np.argsort(imp_a)[-top_k:].tolist())
+            top_b = set(np.argsort(imp_b)[-top_k:].tolist())
+            overlap = len(top_a & top_b)
+            results[(ma, mb)] = {
+                'spearman': float(r) if not np.isnan(r) else None,
+                'spearman_p': float(p) if not np.isnan(p) else None,
+                'top_k_overlap': overlap,
+                'top_k': top_k,
+                'n_features': len(imp_a)
+            }
+    return results

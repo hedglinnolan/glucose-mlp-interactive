@@ -19,7 +19,7 @@ setup(
     url="https://github.com/hedglinnolan/glucose-mlp-interactive",
     py_modules=["app", "data_processor", "models", "visualizations"],
     install_requires=requirements,
-    python_requires=">=3.8",
+    python_requires=">=3.8,<3.10",
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Science/Research",

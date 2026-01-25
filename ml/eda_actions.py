@@ -16,6 +16,8 @@ import streamlit as st
 
 from ml.eval import calculate_regression_metrics, calculate_classification_metrics
 from ml.clinical_units import infer_unit
+from ml.physiology_reference import load_reference_bundle, match_variable_key, get_reference_interval
+from ml.outliers import detect_outliers
 
 
 def plausibility_check(
@@ -34,24 +36,25 @@ def plausibility_check(
     findings = []
     warnings = []
     figures = []
+    reference_bundle = load_reference_bundle()
+    nhanes_ref = reference_bundle["nhanes"]
+    clinical_guidelines = reference_bundle["clinical"]
     
     # Get unit overrides from session state
     unit_overrides = session_state.get('unit_overrides', {})
     
     checked_cols = []
     out_of_range = []
+    empirical_ranges = []
     unit_inferences = []
+    clinical_comparison = []
     
     for col in df.columns:
         col_lower = col.lower()
-        # Check if this matches a known clinical variable pattern
-        is_clinical = any(
-            pattern in col_lower 
-            for pattern in ['weight', 'height', 'waist', 'glucose', 'cholesterol', 
-                          'triglyceride', 'bp_sys', 'bp_di', 'bmi', 'hba1c', 'kcal']
-        )
+        # Check if this matches an NHANES reference variable
+        var_key = match_variable_key(col, nhanes_ref)
         
-        if is_clinical and col in signals.numeric_cols:
+        if var_key and col in signals.numeric_cols:
             checked_cols.append(col)
             col_data = df[col].dropna()
             
@@ -85,79 +88,67 @@ def plausibility_check(
                 
                 unit_inferences.append(unit_row)
                 
-                # If we have a canonical unit and conversion, check ranges
-                if inferred_unit_info.get('canonical_unit') and inferred_unit_info.get('conversion_factor'):
-                    # Get plausible range from clinical_units
-                    from ml.clinical_units import CLINICAL_VARIABLES
-                    matched_var = None
-                    for var_name in CLINICAL_VARIABLES.keys():
-                        if var_name in col_lower:
-                            matched_var = var_name
-                            break
-                    
-                    if matched_var:
-                        var_config = CLINICAL_VARIABLES[matched_var]
-                        thresholds = var_config.get('thresholds', {}).get(inferred_unit_info['inferred_unit'])
-                        fasting_note = var_config.get('fasting_note', False)
-                        
-                        # Find the hypothesis that matches inferred unit
-                        for unit_name, conv_factor, (min_val, max_val) in var_config['hypotheses']:
-                            if unit_name == inferred_unit_info['inferred_unit']:
-                                # Convert to canonical and check
-                                converted = col_data * conv_factor
-                                
-                                # Classify values into threshold bands if available
-                                threshold_bands = {}
-                                if thresholds:
-                                    for band_name, (band_min, band_max) in thresholds.items():
-                                        if band_max is None:
-                                            # >= threshold
-                                            count = (converted >= band_min).sum()
-                                        else:
-                                            count = ((converted >= band_min) & (converted < band_max)).sum()
-                                        threshold_bands[band_name] = count
-                                
-                                # Check against overall plausible range
-                                below_min = (converted < min_val).sum()
-                                above_max = (converted > max_val).sum()
-                                total_out = below_min + above_max
-                                out_rate = total_out / len(col_data)
-                                
-                                # Build range description with threshold bands
-                                range_desc = f"{min_val}-{max_val} {var_config['canonical_unit']}"
-                                if thresholds:
-                                    band_names = {
-                                        'normal': 'Normal',
-                                        'prediabetes': 'Prediabetes',
-                                        'diabetes': 'Diabetes',
-                                        'borderline_high': 'Borderline High',
-                                        'high': 'High',
-                                        'very_high': 'Very High'
-                                    }
-                                    band_summary = []
-                                    for band_name, count in threshold_bands.items():
-                                        pct = count / len(col_data)
-                                        if pct > 0:
-                                            band_summary.append(f"{band_names.get(band_name, band_name)}: {pct:.1%}")
-                                    if band_summary:
-                                        range_desc += f" ({', '.join(band_summary)})"
-                                
-                                if total_out > 0 or (thresholds and any(v > 0 for v in threshold_bands.values() if 'normal' not in str(v))):
-                                    out_of_range.append({
-                                        'Column': col,
-                                        'Inferred Unit': inferred_unit_info['inferred_unit'],
-                                        'Min (canonical)': f"{converted.min():.1f}",
-                                        'Max (canonical)': f"{converted.max():.1f}",
-                                        'Reference Range': range_desc,
-                                        'Out of Range %': f"{out_rate:.1%}" if total_out > 0 else "0%"
-                                    })
-                                    if out_rate > 0.05:
-                                        fasting_text = " (fasting assumption)" if fasting_note else ""
-                                        warnings.append(
-                                            f"{col}: {out_rate:.1%} values outside typical reference range "
-                                            f"({range_desc}){fasting_text} after converting from {inferred_unit_info['inferred_unit']}"
-                                        )
-                                break
+                # Empirical plausibility from NHANES reference (percentile-based)
+                ref_interval = get_reference_interval(nhanes_ref, var_key)
+                if inferred_unit_info.get('conversion_factor') and ref_interval:
+                    ref_low, ref_high, ref_unit = ref_interval
+                    converted = col_data * inferred_unit_info['conversion_factor']
+
+                    below_min = (converted < ref_low).sum()
+                    above_max = (converted > ref_high).sum()
+                    total_out = below_min + above_max
+                    out_rate = total_out / len(col_data)
+
+                    if total_out > 0:
+                        out_of_range.append(col)
+
+                    empirical_ranges.append({
+                        'Column': col,
+                        'Reference Interval (NHANES p01–p99)': f"{ref_low}-{ref_high} {ref_unit}",
+                        'Min (canonical)': f"{converted.min():.1f}",
+                        'Max (canonical)': f"{converted.max():.1f}",
+                        'Out of Range %': f"{out_rate:.1%}" if total_out > 0 else "0%"
+                    })
+
+                    if out_rate > 0.05:
+                        warnings.append(
+                            f"{col}: {out_rate:.1%} values outside NHANES reference interval "
+                            f"({ref_low}-{ref_high} {ref_unit}) after conversion from {inferred_unit_info['inferred_unit']}"
+                        )
+
+                # Clinical guideline comparison (informational only)
+                guideline = clinical_guidelines.get(var_key)
+                if guideline:
+                    thresholds = guideline.get('thresholds_by_unit', {}).get(inferred_unit_info.get('inferred_unit'))
+                    if thresholds:
+                        threshold_bands = {}
+                        for band_name, (band_min, band_max) in thresholds.items():
+                            if band_max is None:
+                                count = (col_data >= band_min).sum()
+                            else:
+                                count = ((col_data >= band_min) & (col_data < band_max)).sum()
+                            threshold_bands[band_name] = count
+
+                        band_names = {
+                            'normal': 'Normal',
+                            'prediabetes': 'Prediabetes',
+                            'diabetes': 'Diabetes',
+                            'borderline_high': 'Borderline High',
+                            'high': 'High',
+                            'very_high': 'Very High'
+                        }
+                        band_summary = []
+                        for band_name, count in threshold_bands.items():
+                            pct = count / len(col_data)
+                            if pct > 0:
+                                band_summary.append(f"{band_names.get(band_name, band_name)}: {pct:.1%}")
+
+                        clinical_comparison.append({
+                            'Column': col,
+                            'Unit (clinical)': inferred_unit_info.get('inferred_unit', 'Unknown'),
+                            'Distribution': ", ".join(band_summary) if band_summary else "No thresholds triggered",
+                            'Note': 'Clinical guideline overlay (informational only)'
+                        })
     
     findings.append(f"Checked {len(checked_cols)} columns with medical/nutritional patterns")
     
@@ -166,32 +157,38 @@ def plausibility_check(
         figures.append(('table', unit_df))
         findings.append(f"Inferred units for {len(unit_inferences)} clinical variables")
     
+    if len(empirical_ranges) > 0:
+        findings.append(f"Computed empirical plausibility for {len(empirical_ranges)} columns (NHANES reference)")
+        empirical_df = pd.DataFrame(empirical_ranges)
+        figures.append(('table', empirical_df))
+    if len(clinical_comparison) > 0:
+        findings.append(f"Computed clinical guideline overlays for {len(clinical_comparison)} columns (informational)")
+        clinical_df = pd.DataFrame(clinical_comparison)
+        figures.append(('table', clinical_df))
     if len(out_of_range) > 0:
         findings.append(f"Found {len(out_of_range)} columns with out-of-range values")
-        out_df = pd.DataFrame(out_of_range)
-        figures.append(('table', out_df))
     else:
         findings.append("All checked columns within plausible ranges")
     
     # Add unit sanity flags from signals
-    if signals.unit_sanity_flags:
-        warnings.extend(signals.unit_sanity_flags)
-        findings.append(f"Found {len(signals.unit_sanity_flags)} potential unit mismatch flags")
+    if signals.physio_plausibility_flags:
+        warnings.extend(signals.physio_plausibility_flags)
+        findings.append(f"Found {len(signals.physio_plausibility_flags)} empirical plausibility flags")
     
     # Add note about unit overrides
     if unit_overrides:
         findings.append(f"Using {len(unit_overrides)} user-specified unit overrides")
     
     # Add insight if unit issues found
-    if signals.unit_sanity_flags or out_of_range:
-        num_unit_flags = len(signals.unit_sanity_flags) if signals.unit_sanity_flags else 0
+    if signals.physio_plausibility_flags or out_of_range:
+        num_flags = len(signals.physio_plausibility_flags) if signals.physio_plausibility_flags else 0
         num_out_of_range = len(out_of_range) if out_of_range else 0
-        insight_finding = f"Unit sanity check: {num_unit_flags} potential unit mismatches, {num_out_of_range} columns with out-of-range values"
-        insight_implication = "Verify units and consider unit overrides if needed. Out-of-range values may indicate data quality issues or unit conversion needed."
+        insight_finding = f"Physiologic plausibility: {num_flags} empirical flags, {num_out_of_range} columns with out-of-range values"
+        insight_implication = "Review units and validate values against NHANES reference intervals. Clinical thresholds are informational only."
         try:
             import streamlit as st
             from utils.storyline import add_insight
-            add_insight('unit_sanity', insight_finding, insight_implication, 'data_quality')
+            add_insight('physio_plausibility', insight_finding, insight_implication, 'data_quality')
         except:
             pass
     
@@ -758,40 +755,310 @@ def outlier_influence(
             'figures': []
         }
     
-    # IQR method
-    Q1 = target_series.quantile(0.25)
-    Q3 = target_series.quantile(0.75)
-    IQR = Q3 - Q1
-    
-    if IQR > 0:
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        outliers = (target_series < lower_bound) | (target_series > upper_bound)
-        n_outliers = outliers.sum()
-        
-        if n_outliers > 0:
-            # Show outlier locations
-            fig = px.scatter(
-                df,
-                x=target,
-                y=target,
-                color=outliers,
-                title=f'Outlier Detection: {target}',
-                labels={'color': 'Outlier'}
-            )
-            figures.append(('plotly', fig))
-            
-            findings.append(f"Found {n_outliers} outliers ({n_outliers/len(target_series):.1%})")
-            findings.append(f"Outlier range: <{lower_bound:.2f} or >{upper_bound:.2f}")
-            warnings.append("High outlier rate may require robust loss (Huber) or winsorization")
-        else:
-            findings.append("No outliers detected using IQR method")
+    outlier_method = session_state.get("eda_outlier_method", "iqr")
+    outliers, info = detect_outliers(target_series, method=outlier_method)
+    n_outliers = outliers.sum()
+
+    if n_outliers > 0:
+        fig = px.scatter(
+            df,
+            x=target,
+            y=target,
+            color=outliers.reindex(df.index, fill_value=False),
+            title=f'Outlier Detection ({outlier_method.upper()}): {target}',
+            labels={'color': 'Outlier'}
+        )
+        figures.append(('plotly', fig))
+
+        findings.append(f"Found {n_outliers} outliers ({n_outliers/len(target_series):.1%}) using {outlier_method.upper()}")
+        if info.get("lower") is not None and info.get("upper") is not None:
+            findings.append(f"Outlier range: <{info['lower']:.2f} or >{info['upper']:.2f}")
+        warnings.append("High outlier rate may require robust loss (Huber) or winsorization")
+    else:
+        findings.append(f"No outliers detected using {outlier_method.upper()} method")
     
     return {
         'findings': findings,
         'warnings': warnings,
         'figures': figures
     }
+
+
+def linearity_scatter(
+    df: pd.DataFrame,
+    target: Optional[str],
+    features: List[str],
+    signals: Any,
+    session_state: Any
+) -> Dict[str, Any]:
+    """Scatter plots of features vs target (linearity check)."""
+    findings = []
+    warnings = []
+    figures = []
+    stats_dict: Dict[str, Any] = {}
+
+    if not target or target not in df.columns:
+        return {'findings': ["Target not available"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    numeric = [f for f in features if f in signals.numeric_cols and f != target]
+    if not numeric:
+        return {'findings': ["No numeric features"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    k = min(6, len(numeric))
+    if signals.task_type_final == 'regression':
+        corrs = [(f, abs(df[f].corr(df[target]))) for f in numeric if not np.isnan(df[f].corr(df[target]))]
+    else:
+        try:
+            sample = df.sample(min(1000, len(df)), random_state=42) if len(df) > 1000 else df
+            mi = mutual_info_classif(sample[numeric], sample[target], random_state=42)
+            corrs = list(zip(numeric, [float(m) for m in mi]))
+        except Exception:
+            corrs = [(f, abs(df[f].corr(df[target]))) for f in numeric if not np.isnan(df[f].corr(df[target]))]
+    corrs.sort(key=lambda x: x[1], reverse=True)
+    top = [c[0] for c in corrs[:k]]
+    stats_dict["feature_correlations"] = corrs[:k]
+
+    for feat in top:
+        if signals.task_type_final == 'regression':
+            fig = px.scatter(df, x=feat, y=target, title=f'{target} vs {feat}')
+        else:
+            fig = px.box(df, x=target, y=feat, title=f'{feat} by {target}')
+        figures.append(('plotly', fig))
+
+    findings.append(f"Plotted top {len(top)} features vs target for linearity check.")
+    return {'findings': findings, 'warnings': warnings, 'figures': figures, 'stats': stats_dict}
+
+
+def residual_analysis(
+    df: pd.DataFrame,
+    target: Optional[str],
+    features: List[str],
+    signals: Any,
+    session_state: Any
+) -> Dict[str, Any]:
+    """Residual analysis from OLS proxy (pre-training)."""
+    findings = []
+    warnings = []
+    figures = []
+    stats_dict: Dict[str, Any] = {}
+
+    if signals.task_type_final != 'regression' or not target:
+        return {'findings': ["Residual analysis only for regression"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    numeric = [f for f in features if f in signals.numeric_cols and f != target]
+    if len(numeric) < 1:
+        return {'findings': ["No numeric features"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    X = df[numeric].fillna(df[numeric].median())
+    y = df[target]
+    valid = ~(y.isna() | X.isna().any(axis=1))
+    X = X[valid].values
+    y = y[valid].values
+    if len(X) < 10:
+        return {'findings': ["Insufficient data"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    from ml.eval import analyze_residuals_extended
+    lm = LinearRegression().fit(X, y)
+    y_pred = lm.predict(X)
+    stats_dict = analyze_residuals_extended(y, y_pred)
+    findings.append(f"OLS proxy on {len(numeric)} features; residuals vs fitted.")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=y_pred, y=y - y_pred, mode='markers', name='Residuals'))
+    fig.update_layout(title='Residuals vs Fitted (OLS proxy)', xaxis_title='Fitted', yaxis_title='Residuals')
+    figures.append(('plotly', fig))
+
+    return {'findings': findings, 'warnings': warnings, 'figures': figures, 'stats': stats_dict}
+
+
+def influence_diagnostics(
+    df: pd.DataFrame,
+    target: Optional[str],
+    features: List[str],
+    signals: Any,
+    session_state: Any
+) -> Dict[str, Any]:
+    """Leverage and Cook's distance from OLS."""
+    findings = []
+    warnings = []
+    figures = []
+    stats_dict: Dict[str, Any] = {}
+
+    if signals.task_type_final != 'regression' or not target:
+        return {'findings': ["Influence diagnostics only for regression"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    numeric = [f for f in features if f in signals.numeric_cols and f != target]
+    if len(numeric) < 1:
+        return {'findings': ["No numeric features"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    X = df[numeric].fillna(df[numeric].median())
+    y = df[target]
+    valid = ~(y.isna() | X.isna().any(axis=1))
+    X_arr = np.column_stack([np.ones(valid.sum()), X[valid].values])
+    y_arr = y[valid].values
+    if len(X_arr) < 10:
+        return {'findings': ["Insufficient data"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    lm = LinearRegression().fit(X_arr[:, 1:], y_arr)
+    y_pred = lm.predict(X_arr[:, 1:])
+    res = y_arr - y_pred
+    mse = np.mean(res ** 2) + 1e-12
+    H = X_arr @ np.linalg.solve(X_arr.T @ X_arr, X_arr.T)
+    h = np.diag(H)
+    k = X_arr.shape[1]
+    cook = (res ** 2 / (k * mse)) * (h / (1 - h) ** 2)
+
+    stats_dict["max_leverage"] = float(np.max(h))
+    stats_dict["max_cooks"] = float(np.max(cook))
+    stats_dict["n_high_leverage"] = int((h > 2 * k / len(X_arr)).sum())
+    stats_dict["n_high_cooks"] = int((cook > 1).sum())
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=np.arange(len(h)), y=h, mode='markers', name='Leverage'))
+    fig.update_layout(title="Leverage (index)", xaxis_title='Index', yaxis_title='Leverage')
+    figures.append(('plotly', fig))
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=np.arange(len(cook)), y=cook, mode='markers', name="Cook's D"))
+    fig2.update_layout(title="Cook's distance (index)", xaxis_title='Index', yaxis_title="Cook's D")
+    figures.append(('plotly', fig2))
+
+    findings.append(f"Max leverage {stats_dict['max_leverage']:.4f}; max Cook's D {stats_dict['max_cooks']:.4f}.")
+    if stats_dict["n_high_cooks"] > 0:
+        warnings.append(f"{stats_dict['n_high_cooks']} point(s) with Cook's D > 1 may have high influence.")
+    return {'findings': findings, 'warnings': warnings, 'figures': figures, 'stats': stats_dict}
+
+
+def normality_residuals(
+    df: pd.DataFrame,
+    target: Optional[str],
+    features: List[str],
+    signals: Any,
+    session_state: Any
+) -> Dict[str, Any]:
+    """Normality of OLS residuals (Q–Q, Shapiro–Wilk)."""
+    findings = []
+    warnings = []
+    figures = []
+    stats_dict: Dict[str, Any] = {}
+
+    if signals.task_type_final != 'regression' or not target:
+        return {'findings': ["Normality check only for regression"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    numeric = [f for f in features if f in signals.numeric_cols and f != target]
+    if len(numeric) < 1:
+        return {'findings': ["No numeric features"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    X = df[numeric].fillna(df[numeric].median())
+    y = df[target]
+    valid = ~(y.isna() | X.isna().any(axis=1))
+    X = X[valid].values
+    y = y[valid].values
+    if len(X) < 10:
+        return {'findings': ["Insufficient data"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    lm = LinearRegression().fit(X, y)
+    res = (y - lm.predict(X)).ravel()
+    osq, osr = stats.probplot(res, dist='norm')
+    stats_dict["shapiro_stat"], stats_dict["shapiro_p"] = stats.shapiro(res[:min(5000, len(res))])
+
+    slope, inter = np.polyfit(osq[0], osq[1], 1)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=osq[0], y=osq[1], mode='markers', name='Residuals'))
+    fig.add_trace(go.Scatter(x=osq[0], y=slope * np.array(osq[0]) + inter, mode='lines', name='Normal'))
+    fig.update_layout(title='Q–Q plot of residuals', xaxis_title='Theoretical', yaxis_title='Sample')
+    figures.append(('plotly', fig))
+
+    findings.append(f"Shapiro–Wilk p={stats_dict['shapiro_p']:.4f}.")
+    if stats_dict['shapiro_p'] < 0.05:
+        warnings.append("Residuals deviate from normality (p < 0.05); inference may be affected.")
+    return {'findings': findings, 'warnings': warnings, 'figures': figures, 'stats': stats_dict}
+
+
+def multicollinearity_vif(
+    df: pd.DataFrame,
+    target: Optional[str],
+    features: List[str],
+    signals: Any,
+    session_state: Any
+) -> Dict[str, Any]:
+    """VIF table for numeric features."""
+    findings = []
+    warnings = []
+    figures = []
+    stats_dict: Dict[str, Any] = {}
+
+    numeric = [f for f in features if f in signals.numeric_cols]
+    if len(numeric) < 2:
+        return {'findings': ["Need ≥2 numeric features for VIF"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    X = df[numeric].fillna(df[numeric].median())
+    vifs = []
+    for i, col in enumerate(numeric):
+        other = [c for j, c in enumerate(numeric) if j != i]
+        try:
+            lm = LinearRegression().fit(X[other], X[col])
+            r2 = r2_score(X[col], lm.predict(X[other]))
+            vif = 1 / (1 - r2) if r2 < 1 else np.inf
+        except Exception:
+            vif = np.nan
+        vifs.append((col, float(vif) if np.isfinite(vif) else 999.0))
+
+    stats_dict["vif"] = vifs
+    vif_df = pd.DataFrame([{"Feature": c, "VIF": v} for c, v in vifs])
+    figures.append(('table', vif_df))
+
+    high = [c for c, v in vifs if v > 10]
+    findings.append(f"VIF computed for {len(numeric)} features.")
+    if high:
+        warnings.append(f"VIF > 10: {', '.join(high)}; consider dropping or regularizing.")
+    return {'findings': findings, 'warnings': warnings, 'figures': figures, 'stats': stats_dict}
+
+
+def data_sufficiency_check(
+    df: pd.DataFrame,
+    target: Optional[str],
+    features: List[str],
+    signals: Any,
+    session_state: Any
+) -> Dict[str, Any]:
+    """Data sufficiency: n, p, n/p."""
+    findings = []
+    warnings = []
+    figures = []
+    n, p = len(df), len(features)
+    ratio = n / p if p else 0
+    stats_dict = {"n_rows": n, "n_features": p, "ratio": ratio}
+
+    tbl = pd.DataFrame([{"Metric": "Samples", "Value": n}, {"Metric": "Features", "Value": p}, {"Metric": "n/p", "Value": f"{ratio:.1f}"}])
+    figures.append(('table', tbl))
+    findings.append(f"n={n:,}, p={p}; n/p={ratio:.1f}.")
+    if ratio < 20:
+        warnings.append("n/p < 20; consider more data or fewer features for stable models.")
+    return {'findings': findings, 'warnings': warnings, 'figures': figures, 'stats': stats_dict}
+
+
+def feature_scaling_check(
+    df: pd.DataFrame,
+    target: Optional[str],
+    features: List[str],
+    signals: Any,
+    session_state: Any
+) -> Dict[str, Any]:
+    """Min, max, std per feature."""
+    findings = []
+    warnings = []
+    figures = []
+    numeric = [f for f in features if f in df.columns and np.issubdtype(df[f].dtype, np.number)]
+    if not numeric:
+        return {'findings': ["No numeric features"], 'warnings': [], 'figures': [], 'stats': {}}
+
+    rows = []
+    for f in numeric[:20]:
+        s = df[f].dropna()
+        rows.append({"Feature": f, "Min": f"{s.min():.4f}", "Max": f"{s.max():.4f}", "Std": f"{s.std():.4f}"})
+    figures.append(('table', pd.DataFrame(rows)))
+    findings.append(f"Scaling summary for {min(len(numeric), 20)} features.")
+    return {'findings': findings, 'warnings': warnings, 'figures': figures, 'stats': {}}
 
 
 def quick_probe_baselines(

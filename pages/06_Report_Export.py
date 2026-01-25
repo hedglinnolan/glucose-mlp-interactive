@@ -18,6 +18,7 @@ from utils.session_state import (
     init_session_state, get_data, get_preprocessing_pipeline,
     DataConfig, SplitConfig, ModelConfig
 )
+from ml.pipeline import get_pipeline_recipe
 from utils.storyline import render_progress_indicator, get_insights_by_category
 from ml.model_registry import get_registry
 
@@ -276,17 +277,27 @@ def generate_report() -> str:
     report_lines.append("---")
     report_lines.append("")
     
-    # Key EDA Insights
+    # Key insights after pre-processing (EDA + preprocessing)
     insights = get_insights_by_category()
-    if insights:
-        report_lines.append("## 💡 Key EDA Insights")
+    eda_insights = [i for i in insights if i.get("category") != "preprocessing"]
+    prep_insights = [i for i in insights if i.get("category") == "preprocessing"]
+    if eda_insights or prep_insights:
+        report_lines.append("## 💡 Key insights after pre-processing")
         report_lines.append("")
-        for insight in insights:
-            report_lines.append(f"### {insight.get('category', 'General').title()}")
-            report_lines.append(f"**Finding:** {insight['finding']}")
+        if eda_insights:
+            report_lines.append("### From EDA")
             report_lines.append("")
-            report_lines.append(f"**Implication:** {insight['implication']}")
+            for insight in eda_insights:
+                report_lines.append(f"**{insight.get('category', 'General').title()}:** {insight['finding']}")
+                report_lines.append(f"→ {insight['implication']}")
+                report_lines.append("")
+        if prep_insights:
+            report_lines.append("### From preprocessing")
             report_lines.append("")
+            for insight in prep_insights:
+                report_lines.append(f"- {insight['finding']}")
+                report_lines.append(f"  → {insight['implication']}")
+                report_lines.append("")
         report_lines.append("---")
         report_lines.append("")
     
@@ -309,11 +320,32 @@ def generate_report() -> str:
     report_lines.append("---")
     report_lines.append("")
     
-    # Preprocessing Pipeline
-    if pipeline:
+    # Preprocessing (per-model when available)
+    pipelines_by_model = st.session_state.get("preprocessing_pipelines_by_model") or {}
+    configs_by_model = st.session_state.get("preprocessing_config_by_model") or {}
+    if pipelines_by_model:
+        report_lines.append("## ⚙️ Preprocessing (per model)")
+        report_lines.append("")
+        for mk, pl in pipelines_by_model.items():
+            report_lines.append(f"### {mk.upper()}")
+            report_lines.append("")
+            recipe = get_pipeline_recipe(pl)
+            report_lines.append("```")
+            report_lines.append(recipe)
+            report_lines.append("```")
+            cfg = configs_by_model.get(mk, {})
+            ov = cfg.get("overrides", [])
+            if ov:
+                report_lines.append("**Overrides:**")
+                for n in ov:
+                    report_lines.append(f"- {n}")
+                report_lines.append("")
+            report_lines.append("")
+        report_lines.append("---")
+        report_lines.append("")
+    elif pipeline:
         report_lines.append("## ⚙️ Preprocessing Pipeline")
         report_lines.append("")
-        from ml.pipeline import get_pipeline_recipe
         recipe = get_pipeline_recipe(pipeline)
         report_lines.append("```")
         report_lines.append(recipe)
@@ -472,7 +504,99 @@ def generate_report() -> str:
             report_lines.append("")
         report_lines.append("---")
         report_lines.append("")
-    
+
+    # Explainability: Partial Dependence, SHAP, Bland-Altman, Robustness
+    pd_data = st.session_state.get("partial_dependence") or {}
+    shap_data = st.session_state.get("shap_results") or {}
+    rob = st.session_state.get("explainability_robustness") or {}
+
+    if pd_data and any(pd_data.values()):
+        report_lines.append("## 📈 Partial Dependence")
+        report_lines.append("")
+        for name, data in pd_data.items():
+            if not data:
+                continue
+            feats = list(data.keys())[:5]
+            report_lines.append(f"**{name.upper()}:** {', '.join(feats)}{'…' if len(data) > 5 else ''}")
+        report_lines.append("")
+        report_lines.append("---")
+        report_lines.append("")
+
+    if shap_data:
+        report_lines.append("## 🔬 SHAP")
+        report_lines.append("")
+        report_lines.append(f"Models: {', '.join(m.upper() for m in shap_data.keys())}.")
+        for name, s in shap_data.items():
+            ss = s.get("stats_summary", "")
+            if ss:
+                report_lines.append(f"- **{name.upper()}:** {ss[:120]}{'…' if len(ss) > 120 else ''}")
+        report_lines.append("")
+        report_lines.append("---")
+        report_lines.append("")
+
+    if rob:
+        report_lines.append("## 🔄 Cross-Model Robustness")
+        report_lines.append("")
+        report_lines.append("| Model A | Model B | Spearman ρ | Top-5 overlap |")
+        report_lines.append("|---------|---------|------------|---------------|")
+        for (ma, mb), v in list(rob.items())[:10]:
+            r = v.get("spearman")
+            r_str = f"{r:.3f}" if r is not None else "N/A"
+            ov = v.get("top_k_overlap", "N/A")
+            report_lines.append(f"| {ma} | {mb} | {r_str} | {ov} |")
+        report_lines.append("")
+        report_lines.append("---")
+        report_lines.append("")
+
+    # Bland-Altman (compute from model pairs when we have predictions)
+    try:
+        from ml.eval import analyze_bland_altman
+        model_keys = list(trained_models.keys())
+        ba_pairs = []
+        for i, ma in enumerate(model_keys):
+            for mb in model_keys[i + 1 :]:
+                ra = model_results.get(ma, {})
+                rb = model_results.get(mb, {})
+                ya = ra.get("y_test_pred")
+                yb = rb.get("y_test_pred")
+                if ya is not None and yb is not None and len(ya) == len(yb):
+                    ba = analyze_bland_altman(ya, yb)
+                    if ba:
+                        ba_pairs.append((ma, mb, ba))
+        if ba_pairs:
+            report_lines.append("## 📉 Bland-Altman")
+            report_lines.append("")
+            report_lines.append("| Model A | Model B | Mean diff | LoA width | % outside LoA |")
+            report_lines.append("|---------|---------|-----------|-----------|---------------|")
+            for ma, mb, ba in ba_pairs[:10]:
+                md = ba.get("mean_diff", 0)
+                w = ba.get("width_loa", 0)
+                pct = ba.get("pct_outside_loa", 0)
+                report_lines.append(f"| {ma} | {mb} | {md:.4f} | {w:.4f} | {pct:.1%} |")
+            report_lines.append("")
+            report_lines.append("---")
+            report_lines.append("")
+    except Exception:
+        pass
+
+    # LLM-backed interpretations (optional)
+    include_llm = st.session_state.get("report_include_llm", False)
+    if include_llm:
+        llm_items = [
+            (k, v) for k, v in st.session_state.items()
+            if isinstance(k, str) and k.startswith("llm_result_") and v not in ("__unavailable__", "__error__")
+        ]
+        if llm_items:
+            report_lines.append("## 🤖 LLM-backed interpretations")
+            report_lines.append("")
+            for k, v in llm_items[:20]:
+                label = k.replace("llm_result_", "").replace("_", " ").title()
+                report_lines.append(f"**{label}**")
+                report_lines.append(f"{v}")
+                report_lines.append("")
+            report_lines.append("---")
+            report_lines.append("")
+
     # Recommendations
     if coach_output:
         report_lines.append("## 💡 Model Selection Coach Insights")
@@ -494,18 +618,13 @@ def generate_report() -> str:
     report_lines.append("")
     report_lines.append("- This report was generated automatically by the Modeling Lab")
     report_lines.append("- All models were evaluated on the same held-out test set")
-    report_lines.append("- Preprocessing was applied consistently across all models")
+    if pipelines_by_model:
+        report_lines.append("- Preprocessing was applied per model (see Preprocessing section)")
+    else:
+        report_lines.append("- Preprocessing was applied consistently across all models")
     report_lines.append(f"- Random seed: {st.session_state.get('random_seed', 42)} (for reproducibility)")
     report_lines.append("")
-    
-    preprocessing_config = st.session_state.get('preprocessing_config', {})
-    if preprocessing_config.get('use_pca') or preprocessing_config.get('use_kmeans_features'):
-        report_lines.append("**Feature Engineering:**")
-        if preprocessing_config.get('use_pca'):
-            report_lines.append(f"- PCA enabled with {preprocessing_config.get('pca_n_components')} components")
-        if preprocessing_config.get('use_kmeans_features'):
-            report_lines.append(f"- KMeans clustering with {preprocessing_config.get('kmeans_n_clusters')} clusters")
-    
+
     return "\n".join(report_lines)
 
 
@@ -532,6 +651,7 @@ with st.expander("⚙️ Export Configuration"):
     export_predictions = st.checkbox("Include predictions CSV", value=True)
     export_plots = st.checkbox("Include plots (requires kaleido)", value=False)
     include_raw_data = st.checkbox("Include raw data sample (first 100 rows)", value=False)
+    st.checkbox("Include LLM interpretations in report", value=False, key="report_include_llm")
 
 
 # Helper function to save plotly figures as images

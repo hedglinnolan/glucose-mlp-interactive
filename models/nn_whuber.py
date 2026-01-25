@@ -137,9 +137,9 @@ class SklearnCompatibleNNRegressor(BaseEstimator, RegressorMixin):
         }
     
     def set_params(self, **params):
-        """Set parameters (sklearn interface)."""
-        for key, value in params.items():
-            setattr(self, key, value)
+        """Set parameters (sklearn interface). Only wrapper_instance is allowed."""
+        if "wrapper_instance" in params:
+            self.wrapper_instance = params["wrapper_instance"]
         return self
 
 
@@ -204,9 +204,9 @@ class SklearnCompatibleNNClassifier(BaseEstimator, ClassifierMixin):
         }
     
     def set_params(self, **params):
-        """Set parameters (sklearn interface)."""
-        for key, value in params.items():
-            setattr(self, key, value)
+        """Set parameters (sklearn interface). Only wrapper_instance is allowed."""
+        if "wrapper_instance" in params:
+            self.wrapper_instance = params["wrapper_instance"]
         return self
 
 

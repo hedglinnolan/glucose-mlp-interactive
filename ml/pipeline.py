@@ -11,6 +11,84 @@ from sklearn.preprocessing import StandardScaler, RobustScaler, OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer
 from ml.feature_steps import create_pca_step, KMeansFeatures
+from ml.preprocess_operators import UnitHarmonizer, PlausibilityGate, OutlierCapping
+from ml.clinical_units import infer_unit, CLINICAL_VARIABLES
+from ml.physiology_reference import load_reference_bundle, match_variable_key, get_reference_interval
+
+
+def build_unit_harmonization_config(
+    df: pd.DataFrame,
+    numeric_features: List[str],
+    unit_overrides: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Compute conversion factors to canonical units for numeric features."""
+    unit_overrides = unit_overrides or {}
+    conversion_factors = []
+    inferred_units = {}
+    canonical_units = {}
+
+    for col in numeric_features:
+        col_lower = col.lower()
+        override_unit = unit_overrides.get(col)
+        matched_var = next((var for var in CLINICAL_VARIABLES.keys() if var in col_lower), None)
+
+        if matched_var and override_unit:
+            var_config = CLINICAL_VARIABLES[matched_var]
+            hypothesis = next((h for h in var_config["hypotheses"] if h[0] == override_unit), None)
+            if hypothesis:
+                unit_name, conv_factor, _ = hypothesis
+                conversion_factors.append(conv_factor)
+                inferred_units[col] = unit_name
+                canonical_units[col] = var_config.get("canonical_unit")
+                continue
+
+        inferred = infer_unit(col, df[col].dropna())
+        conv = inferred.get("conversion_factor", 1.0)
+        conversion_factors.append(conv if conv is not None else 1.0)
+        inferred_units[col] = inferred.get("inferred_unit")
+        canonical_units[col] = inferred.get("canonical_unit")
+
+    return {
+        "conversion_factors": conversion_factors,
+        "inferred_units": inferred_units,
+        "canonical_units": canonical_units
+    }
+
+
+def build_plausibility_bounds(
+    numeric_features: List[str],
+    conversion_factors: List[float]
+) -> Dict[str, Any]:
+    """Build NHANES-based plausibility bounds aligned to numeric_features."""
+    reference_bundle = load_reference_bundle()
+    nhanes_ref = reference_bundle["nhanes"]
+    lower_bounds = []
+    upper_bounds = []
+    bounds_by_feature = {}
+
+    for col, factor in zip(numeric_features, conversion_factors):
+        var_key = match_variable_key(col, nhanes_ref)
+        ref_interval = get_reference_interval(nhanes_ref, var_key) if var_key else None
+        if ref_interval:
+            ref_low, ref_high, ref_unit = ref_interval
+            lower_bounds.append(ref_low)
+            upper_bounds.append(ref_high)
+            bounds_by_feature[col] = {
+                "lower": ref_low,
+                "upper": ref_high,
+                "unit": ref_unit
+            }
+        else:
+            lower_bounds.append(None)
+            upper_bounds.append(None)
+            bounds_by_feature[col] = None
+
+    return {
+        "lower_bounds": lower_bounds,
+        "upper_bounds": upper_bounds,
+        "bounds_by_feature": bounds_by_feature,
+        "reference_version": nhanes_ref.get("version")
+    }
 
 
 def build_preprocessing_pipeline(
@@ -19,6 +97,11 @@ def build_preprocessing_pipeline(
     numeric_imputation: str = 'median',  # 'mean', 'median', 'constant'
     numeric_scaling: str = 'standard',  # 'standard', 'robust', 'none'
     numeric_log_transform: bool = False,
+    numeric_missing_indicators: bool = False,
+    numeric_outlier_treatment: str = 'none',  # 'none', 'percentile', 'mad'
+    numeric_outlier_params: Optional[Dict[str, Any]] = None,
+    unit_harmonization_factors: Optional[List[float]] = None,
+    plausibility_bounds: Optional[Dict[str, Any]] = None,
     categorical_imputation: str = 'most_frequent',  # 'most_frequent', 'constant'
     categorical_encoding: str = 'onehot',  # 'onehot', 'target' (if enabled)
     handle_unknown: str = 'ignore',  # For one-hot encoding
@@ -53,20 +136,41 @@ def build_preprocessing_pipeline(
     # Numeric preprocessing
     if numeric_features:
         numeric_steps = []
-        
+
+        # Unit harmonization (convert to canonical units)
+        if unit_harmonization_factors:
+            numeric_steps.append(('unit_harmonize', UnitHarmonizer(unit_harmonization_factors)))
+
+        # Plausibility gating (set out-of-range to NaN)
+        if plausibility_bounds:
+            numeric_steps.append((
+                'plausibility_gate',
+                PlausibilityGate(
+                    plausibility_bounds.get("lower_bounds", []),
+                    plausibility_bounds.get("upper_bounds", [])
+                )
+            ))
+
         # Imputation
         if numeric_imputation == 'mean':
-            numeric_steps.append(('imputer', SimpleImputer(strategy='mean')))
+            numeric_steps.append(('imputer', SimpleImputer(strategy='mean', add_indicator=numeric_missing_indicators)))
         elif numeric_imputation == 'median':
-            numeric_steps.append(('imputer', SimpleImputer(strategy='median')))
+            numeric_steps.append(('imputer', SimpleImputer(strategy='median', add_indicator=numeric_missing_indicators)))
         elif numeric_imputation == 'constant':
-            numeric_steps.append(('imputer', SimpleImputer(strategy='constant', fill_value=0)))
+            numeric_steps.append(('imputer', SimpleImputer(strategy='constant', fill_value=0, add_indicator=numeric_missing_indicators)))
         
         # Log transform (optional)
         if numeric_log_transform:
             def log_transform(X):
                 return np.log1p(np.maximum(X, 0))  # log1p handles zeros
             numeric_steps.append(('log', FunctionTransformer(log_transform)))
+
+        # Outlier treatment
+        if numeric_outlier_treatment and numeric_outlier_treatment != 'none':
+            numeric_steps.append((
+                'outlier',
+                OutlierCapping(method=numeric_outlier_treatment, params=numeric_outlier_params or {})
+            ))
         
         # Scaling
         if numeric_scaling == 'standard':
@@ -158,11 +262,20 @@ def get_pipeline_recipe(pipeline: Pipeline) -> str:
                 step_desc = f"Numeric features ({len(columns)}): "
                 step_parts = []
                 for step_name, step_transformer in numeric_pipe.steps:
-                    if step_name == 'imputer':
+                    if step_name == 'unit_harmonize':
+                        step_parts.append("Unit harmonization")
+                    elif step_name == 'plausibility_gate':
+                        step_parts.append("Plausibility gate (NHANES)")
+                    elif step_name == 'imputer':
                         strategy = step_transformer.strategy
-                        step_parts.append(f"Impute ({strategy})")
+                        if getattr(step_transformer, 'add_indicator', False):
+                            step_parts.append(f"Impute ({strategy}) + missing flags")
+                        else:
+                            step_parts.append(f"Impute ({strategy})")
                     elif step_name == 'log':
                         step_parts.append("Log transform")
+                    elif step_name == 'outlier':
+                        step_parts.append("Outlier capping")
                     elif step_name == 'scaler':
                         if isinstance(step_transformer, StandardScaler):
                             step_parts.append("Standard scaling")
@@ -187,22 +300,22 @@ def get_pipeline_recipe(pipeline: Pipeline) -> str:
                 steps.append(step_desc)
     
     # Add optional feature engineering steps
-    if 'kmeans_features' in pipeline.named_steps:
-        kmeans = pipeline.named_steps['kmeans_features']
-        kmeans_desc = f"KMeans Features: {kmeans.n_clusters} clusters"
+    if "kmeans_features" in pipeline.named_steps:
+        kmeans = pipeline.named_steps["kmeans_features"]
+        kmeans_desc = f"KMeans features added: {kmeans.n_clusters} clusters"
         if kmeans.add_distances:
-            kmeans_desc += ", distances"
+            kmeans_desc += ", distances to centroids"
         if kmeans.add_onehot_label:
-            kmeans_desc += ", one-hot labels"
+            kmeans_desc += ", one-hot cluster labels"
         steps.append(kmeans_desc)
-    
-    if 'pca' in pipeline.named_steps:
-        pca = pipeline.named_steps['pca']
+
+    if "pca" in pipeline.named_steps:
+        pca = pipeline.named_steps["pca"]
         n_comp = pca.n_components_
         if isinstance(n_comp, (int, np.integer)):
-            steps.append(f"PCA: {n_comp} components")
+            steps.append(f"PCA applied: {n_comp} components (output PC1, PC2, ...)")
         else:
-            steps.append(f"PCA: {n_comp} components (variance threshold)")
+            steps.append(f"PCA applied: {n_comp} components (variance threshold)")
         if pca.whiten:
             steps[-1] += ", whitened"
     
@@ -212,43 +325,75 @@ def get_pipeline_recipe(pipeline: Pipeline) -> str:
 def get_feature_names_after_transform(pipeline: Pipeline, original_feature_names: List[str]) -> List[str]:
     """
     Get feature names after pipeline transformation.
-    Handles sparse matrices and OneHotEncoder properly.
-    
-    Args:
-        pipeline: Fitted sklearn Pipeline
-        original_feature_names: Original feature names before transformation
-        
-    Returns:
-        List of feature names after transformation
+    Handles preprocessor, optional KMeansFeatures, and optional PCA.
+    KMeans replaces preprocessor output with kmeans_dist_cluster_* / kmeans_cluster_*.
+    PCA replaces preceding features with PC1, PC2, ...
     """
+    feature_names: List[str] = []
+
     try:
-        preprocessor = pipeline.named_steps['preprocessor']
-        if hasattr(preprocessor, 'get_feature_names_out'):
-            return list(preprocessor.get_feature_names_out())
+        preprocessor = pipeline.named_steps["preprocessor"]
+        if hasattr(preprocessor, "get_feature_names_out"):
+            feature_names = [str(x) for x in preprocessor.get_feature_names_out()]
+        else:
+            feature_names = _preprocessor_names_fallback(preprocessor, original_feature_names)
     except Exception:
-        pass
-    
-    # Fallback: construct names manually
-    feature_names = []
-    
-    if hasattr(pipeline.named_steps['preprocessor'], 'transformers_'):
-        for name, transformer, columns in pipeline.named_steps['preprocessor'].transformers_:
-            if name == 'numeric':
-                # Numeric features keep their names (unless scaled, but we keep original)
-                feature_names.extend(columns)
-            elif name == 'categorical':
-                # Categorical: one-hot encoding creates multiple columns
-                categorical_pipe = transformer
-                for step_name, step_transformer in categorical_pipe.steps:
-                    if step_name == 'encoder' and isinstance(step_transformer, OneHotEncoder):
-                        # Get categories for each original column
-                        if hasattr(step_transformer, 'categories_'):
-                            for col_idx, col_name in enumerate(columns):
-                                categories = step_transformer.categories_[col_idx]
-                                for cat in categories:
-                                    feature_names.append(f"{col_name}_{cat}")
-                        else:
-                            # Fallback: use column names
-                            feature_names.extend([f"{col}_encoded" for col in columns])
-    
-    return feature_names if feature_names else [f"feature_{i}" for i in range(pipeline.transform([[0]*len(original_feature_names)]).shape[1])]
+        feature_names = _preprocessor_names_fallback(
+            pipeline.named_steps.get("preprocessor"),
+            original_feature_names,
+        )
+
+    if "kmeans_features" in pipeline.named_steps:
+        kmeans = pipeline.named_steps["kmeans_features"]
+        if hasattr(kmeans, "get_feature_names_out"):
+            feature_names = [str(x) for x in kmeans.get_feature_names_out()]
+        else:
+            feature_names = []
+            if getattr(kmeans, "add_distances", True):
+                for i in range(kmeans.n_clusters):
+                    feature_names.append(f"kmeans_dist_{i}")
+            if getattr(kmeans, "add_onehot_label", False):
+                for i in range(kmeans.n_clusters):
+                    feature_names.append(f"kmeans_cluster_{i}")
+
+    if "pca" in pipeline.named_steps:
+        pca = pipeline.named_steps["pca"]
+        n = pca.components_.shape[0]
+        feature_names = [f"PC{i + 1}" for i in range(n)]
+
+    if not feature_names:
+        try:
+            dummy_df = pd.DataFrame(
+                np.zeros((1, len(original_feature_names))),
+                columns=original_feature_names[: len(original_feature_names)],
+            )
+            t = pipeline.transform(dummy_df)
+            t = t.toarray() if hasattr(t, "toarray") else np.asarray(t)
+            n_out = t.shape[1]
+            feature_names = [f"feature_{i}" for i in range(n_out)]
+        except Exception:
+            feature_names = [f"feature_{i}" for i in range(64)]
+
+    return feature_names
+
+
+def _preprocessor_names_fallback(preprocessor, original_feature_names: List[str]) -> List[str]:
+    """Fallback when get_feature_names_out is not available."""
+    out: List[str] = []
+    if preprocessor is None or not hasattr(preprocessor, "transformers_"):
+        return out
+    for name, transformer, columns in preprocessor.transformers_:
+        if name == "numeric":
+            out.extend(columns)
+        elif name == "categorical":
+            cat_pipe = transformer
+            for _sn, st in cat_pipe.steps:
+                if _sn == "encoder" and isinstance(st, OneHotEncoder) and hasattr(st, "categories_"):
+                    for col_idx, col_name in enumerate(columns):
+                        for c in st.categories_[col_idx]:
+                            out.append(f"{col_name}_{c}")
+                    break
+                elif _sn == "encoder":
+                    out.extend([f"{c}_encoded" for c in columns])
+                    break
+    return out

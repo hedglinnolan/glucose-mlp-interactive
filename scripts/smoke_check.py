@@ -107,11 +107,29 @@ def test_import_triage():
     from ml.triage import detect_task_type, detect_cohort_structure
 
 
+@test("Import: ml.outliers")
+def test_import_outliers():
+    from ml.outliers import detect_outliers, outlier_rate
+
+
+@test("Import: ml.physiology_reference")
+def test_import_physiology_reference():
+    from ml.physiology_reference import (
+        load_reference_bundle, match_variable_key, get_reference_interval,
+        load_nhanes_reference
+    )
+
+
+@test("Import: ml.preprocess_operators")
+def test_import_preprocess_operators():
+    from ml.preprocess_operators import UnitHarmonizer, PlausibilityGate, OutlierCapping
+
+
 @test("Import: ml.eval")
 def test_import_eval():
     from ml.eval import (
         calculate_regression_metrics, calculate_classification_metrics,
-        perform_cross_validation, analyze_residuals
+        perform_cross_validation, analyze_residuals, compare_importance_ranks
     )
 
 
@@ -133,6 +151,16 @@ def test_import_rf():
 @test("Import: data_processor")
 def test_import_data_processor():
     from data_processor import load_and_preview_csv, get_numeric_columns
+
+
+@test("Import: visualizations.plot_bland_altman")
+def test_import_plot_bland_altman():
+    from visualizations import plot_bland_altman
+
+
+@test("Import: ml.llm_local")
+def test_import_llm_local():
+    from ml import llm_local
 
 
 # ============================================================
@@ -287,10 +315,11 @@ def test_dataset_profile():
     })
     
     profile = compute_dataset_profile(
-        df, 
+        df,
         target_col='target',
         feature_cols=['feature1', 'feature2', 'category'],
-        task_type='regression'
+        task_type='regression',
+        outlier_method='iqr'
     )
     
     assert profile.n_rows == 100, "Should have 100 rows"
@@ -315,10 +344,11 @@ def test_profile_classification():
     })
     
     profile = compute_dataset_profile(
-        df, 
+        df,
         target_col='target',
         feature_cols=['feature1'],
-        task_type='classification'
+        task_type='classification',
+        outlier_method='iqr'
     )
     
     assert profile.target_profile.task_type == 'classification'
@@ -340,10 +370,11 @@ def test_profile_warnings():
     })
     
     profile = compute_dataset_profile(
-        df, 
+        df,
         target_col='target',
         feature_cols=['feature1'],
-        task_type='regression'
+        task_type='regression',
+        outlier_method='iqr'
     )
     
     # Should have sample size warning
@@ -367,10 +398,11 @@ def test_coach_with_profile():
     })
     
     profile = compute_dataset_profile(
-        df, 
+        df,
         target_col='target',
         feature_cols=['feature1', 'feature2'],
-        task_type='regression'
+        task_type='regression',
+        outlier_method='iqr'
     )
     
     coach_output = compute_model_recommendations(profile)
@@ -414,6 +446,230 @@ def test_model_recommendation_fields():
     assert rec.training_time == TrainingTimeTier.FAST
 
 
+@test("Outliers: detect_outliers IQR")
+def test_detect_outliers_iqr():
+    import pandas as pd
+    from ml.outliers import detect_outliers
+
+    s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0, 100.0])  # 100 is outlier
+    mask, info = detect_outliers(s, method="iqr")
+    assert isinstance(mask, pd.Series), "Should return Series mask"
+    assert mask.dtype == bool, "Mask should be boolean"
+    assert info["method"] == "iqr", "Info should record method"
+    assert info.get("lower") is not None or info.get("upper") is not None, "Should have bounds"
+
+
+@test("Physiology: load_reference_bundle structure")
+def test_load_reference_bundle():
+    from ml.physiology_reference import load_reference_bundle
+
+    bundle = load_reference_bundle()
+    assert "nhanes" in bundle, "Bundle should have nhanes"
+    assert "clinical" in bundle, "Bundle should have clinical"
+    nhanes = bundle["nhanes"]
+    assert "variables" in nhanes, "NHANES should have variables"
+    assert len(nhanes["variables"]) > 0, "NHANES variables should not be empty"
+
+
+@test("Preprocess: UnitHarmonizer transform")
+def test_unit_harmonizer():
+    import numpy as np
+    from ml.preprocess_operators import UnitHarmonizer
+
+    X = np.array([[1.0, 2.0], [3.0, 4.0]])
+    h = UnitHarmonizer(conversion_factors=[2.0, 0.5])
+    out = h.fit_transform(X)
+    assert out.shape == X.shape
+    assert out[0, 0] == 2.0 and out[0, 1] == 1.0, "Should scale by factors"
+
+
+@test("Preprocess: OutlierCapping fit_transform")
+def test_outlier_capping():
+    import numpy as np
+    from ml.preprocess_operators import OutlierCapping
+
+    X = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0], [5.0, 50.0]])
+    c = OutlierCapping(method="percentile", params={"lower_q": 0.1, "upper_q": 0.9})
+    out = c.fit_transform(X)
+    assert out.shape == X.shape
+    assert out.min() >= np.nanmin(c.lower_bounds_) and out.max() <= np.nanmax(c.upper_bounds_), \
+        "Output should be clipped to bounds"
+
+
+@test("Eval: compare_importance_ranks")
+def test_compare_importance_ranks():
+    import numpy as np
+    from ml.eval import compare_importance_ranks
+
+    names = ["ridge", "lasso"]
+    fnames = ["f1", "f2", "f3"]
+    perm = {
+        "ridge": {"importances_mean": np.array([0.1, 0.5, 0.3])},
+        "lasso": {"importances_mean": np.array([0.2, 0.4, 0.4])},
+    }
+    fn_by_model = {"ridge": fnames, "lasso": fnames}
+    out = compare_importance_ranks(names, perm, fn_by_model, top_k=2)
+    assert isinstance(out, dict), "Should return dict"
+    assert ("ridge", "lasso") in out, "Should have ridge vs lasso"
+    r = out[("ridge", "lasso")]
+    assert "spearman" in r and "top_k_overlap" in r and "n_features" in r, "Result should have expected keys"
+
+
+@test("Viz: plot_bland_altman returns figure")
+def test_plot_bland_altman():
+    import numpy as np
+    from visualizations import plot_bland_altman
+
+    a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    b = np.array([1.1, 2.2, 2.9, 4.1, 4.8])
+    fig = plot_bland_altman(a, b, title="Test", label_a="A", label_b="B")
+    assert fig is not None, "Should return figure"
+    assert hasattr(fig, "add_trace") and hasattr(fig, "update_layout"), "Should be Plotly Figure"
+
+
+@test("Eval: analyze_residuals_extended, analyze_pred_vs_actual, analyze_bland_altman")
+def test_eval_extended_stats():
+    import numpy as np
+    from ml.eval import (
+        analyze_residuals_extended,
+        analyze_pred_vs_actual,
+        analyze_bland_altman,
+        analyze_confusion_matrix,
+    )
+
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    p = np.array([1.1, 2.1, 2.9, 4.2, 4.7])
+    r = analyze_residuals_extended(y, p)
+    assert "skew" in r and "iqr" in r, "Extended residuals should have skew, iqr"
+    pva = analyze_pred_vs_actual(y, p)
+    assert "correlation" in pva and "bias_by_quintile" in pva
+    ba = analyze_bland_altman(y, p)
+    assert "mean_diff" in ba and "pct_outside_loa" in ba
+    yt = np.array([0, 0, 1, 1, 1])
+    yp = np.array([0, 1, 1, 1, 0])
+    cm = analyze_confusion_matrix(yt, yp)
+    assert "per_class" in cm and "top_confusions" in cm
+
+
+@test("Plot narrative: narrative_residuals, narrative_pred_vs_actual, narrative_bland_altman")
+def test_plot_narrative():
+    from ml.plot_narrative import (
+        narrative_residuals,
+        narrative_pred_vs_actual,
+        narrative_bland_altman,
+        narrative_permutation_importance,
+    )
+    from ml.eval import analyze_residuals_extended, analyze_pred_vs_actual, analyze_bland_altman
+
+    import numpy as np
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    p = np.array([1.1, 2.1, 2.9, 4.2, 4.7])
+    r = analyze_residuals_extended(y, p)
+    n1 = narrative_residuals(r, model_name="ridge")
+    assert isinstance(n1, str) and len(n1) > 0
+    pva = analyze_pred_vs_actual(y, p)
+    n2 = narrative_pred_vs_actual(pva, model_name="ridge")
+    assert isinstance(n2, str)
+    ba = analyze_bland_altman(y, p)
+    n3 = narrative_bland_altman(ba, label_a="A", label_b="B")
+    assert isinstance(n3, str) and len(n3) > 0
+    perm = {"importances_mean": np.array([0.1, 0.5, 0.3]), "feature_names": ["f1", "f2", "f3"]}
+    n4 = narrative_permutation_importance(perm, model_name="ridge")
+    assert isinstance(n4, str) and "f2" in n4
+
+    from ml.plot_narrative import narrative_robustness, narrative_partial_dependence
+    rob = {("m1", "m2"): {"spearman": 0.9, "top_k_overlap": 4}}
+    n5 = narrative_robustness(rob)
+    assert isinstance(n5, str) and len(n5) > 0
+    pd_data = {"feat1": {"values": [0, 1, 2], "average": [0.1, 0.2, 0.3]}}
+    n6 = narrative_partial_dependence(pd_data, model_name="ridge")
+    assert isinstance(n6, str) and len(n6) > 0
+
+
+@test("LLM local: enhance_with_ollama (no HTTP)")
+def test_llm_local():
+    from ml.llm_local import enhance_with_ollama
+
+    out = enhance_with_ollama("", "test context")
+    assert out == ""
+
+
+@test("Import: utils.llm_ui")
+def test_import_llm_ui():
+    from utils.llm_ui import render_interpretation_with_llm_button
+
+
+@test("LLM local: ensure_ollama_running (no crash)")
+def test_ensure_ollama_running():
+    from ml.llm_local import ensure_ollama_running
+
+    # Ping non-existent URL; spawn may run but we still ping that URL -> False. No crash.
+    ok = ensure_ollama_running("http://127.0.0.1:9999", wait_seconds=2)
+    assert ok is False
+
+
+@test("Upload flow: load_and_preview_csv + reconcile_state_with_df")
+def test_upload_flow():
+    import io
+
+    class MockSession(dict):
+        def __getattr__(self, k):
+            return self.get(k)
+        def __setattr__(self, k, v):
+            self[k] = v
+
+    from data_processor import load_and_preview_csv, get_numeric_columns
+    from utils.state_reconcile import reconcile_state_with_df
+    from utils.session_state import DataConfig
+
+    csv = "a,b,c\n1,2,3\n4,5,6\n7,8,9"
+    buf = io.BytesIO(csv.encode("utf-8"))
+    df = load_and_preview_csv(buf)
+    assert df is not None and len(df) == 3 and list(df.columns) == ["a", "b", "c"]
+
+    numeric = get_numeric_columns(df)
+    assert "a" in numeric and "b" in numeric and "c" in numeric
+
+    session = MockSession()
+    session["data_config"] = DataConfig(target_col="c", feature_cols=["a", "b"])
+    reconcile_state_with_df(df, session)
+    cfg = session.get("data_config")
+    assert cfg is not None and cfg.target_col == "c" and set(cfg.feature_cols) == {"a", "b"}
+
+
+@test("EDA: narrative helpers + data_sufficiency_check")
+def test_eda_narratives_and_actions():
+    import pandas as pd
+    from ml.plot_narrative import (
+        narrative_eda_linearity,
+        narrative_eda_influence,
+        narrative_eda_normality,
+        narrative_eda_sufficiency,
+        narrative_eda_multicollinearity,
+    )
+    from ml.eda_actions import data_sufficiency_check, linearity_scatter
+    from ml.eda_recommender import DatasetSignals
+
+    assert isinstance(narrative_eda_linearity({}), str)
+    assert isinstance(narrative_eda_influence({}), str)
+    assert isinstance(narrative_eda_normality({}), str)
+    assert isinstance(narrative_eda_sufficiency({"ratio": 25, "n_rows": 100, "n_features": 4}), str)
+    assert isinstance(narrative_eda_multicollinearity({"vif": [("x", 5.0)]}), str)
+
+    df = pd.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
+    signals = DatasetSignals(
+        n_rows=3, n_cols=2, numeric_cols=["x", "y"],
+        task_type_final="regression", target_name="y",
+    )
+    session = {}
+    out = data_sufficiency_check(df, "y", ["x"], signals, session)
+    assert "findings" in out and "figures" in out and "stats" in out
+    assert out["stats"].get("n_rows") == 3 and out["stats"].get("n_features") == 1
+
+    out2 = linearity_scatter(df, "y", ["x"], signals, session)
+    assert "findings" in out2 and "figures" in out2 and "stats" in out2
+
+
 # ============================================================
 # Main execution
 # ============================================================
@@ -433,11 +689,17 @@ def run_all_tests():
     test_import_dataset_profile()
     test_import_eda_recommender()
     test_import_triage()
+    test_import_outliers()
+    test_import_physiology_reference()
+    test_import_preprocess_operators()
     test_import_eval()
     test_import_nn_wrapper()
     test_import_glm()
     test_import_rf()
     test_import_data_processor()
+    test_import_plot_bland_altman()
+    test_import_llm_local()
+    test_import_llm_ui()
     
     print("\nFunctional Tests:")
     print("-" * 40)
@@ -454,6 +716,18 @@ def run_all_tests():
     test_profile_warnings()
     test_coach_with_profile()
     test_model_recommendation_fields()
+    test_detect_outliers_iqr()
+    test_load_reference_bundle()
+    test_unit_harmonizer()
+    test_outlier_capping()
+    test_compare_importance_ranks()
+    test_plot_bland_altman()
+    test_eval_extended_stats()
+    test_plot_narrative()
+    test_llm_local()
+    test_ensure_ollama_running()
+    test_upload_flow()
+    test_eda_narratives_and_actions()
     
     # Summary
     print("\n" + "=" * 60)

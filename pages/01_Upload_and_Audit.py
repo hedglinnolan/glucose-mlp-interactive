@@ -7,9 +7,10 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
 import logging
+from datetime import datetime
 
 from utils.session_state import (
-    init_session_state, set_data, get_data, DataConfig,
+    init_session_state, set_data, get_data, DataConfig, reset_data_dependent_state,
     TaskTypeDetection, CohortStructureDetection
 )
 from utils.datasets import get_builtin_datasets
@@ -21,6 +22,44 @@ from ml.triage import detect_task_type, detect_cohort_structure
 from ml.eda_recommender import compute_dataset_signals
 
 logger = logging.getLogger(__name__)
+
+# Re-upload handling helpers
+def _next_dataset_id() -> int:
+    current = st.session_state.get("dataset_id")
+    return 1 if current is None else current + 1
+
+
+def _archive_current_dataset(reason: str):
+    existing = get_data()
+    if existing is None:
+        return
+    history = st.session_state.get("dataset_history", [])
+    history.append({
+        "dataset_id": st.session_state.get("dataset_id"),
+        "data_source": st.session_state.get("data_source"),
+        "data_filename": st.session_state.get("data_filename"),
+        "reason": reason,
+        "rows": len(existing),
+        "columns": list(existing.columns),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    })
+    st.session_state.dataset_history = history
+
+
+def _choose_replace_action(key: str, new_label: str) -> str:
+    existing_label = st.session_state.get("data_filename") or st.session_state.get("data_source")
+    if existing_label:
+        st.info(f"Current dataset: {existing_label}")
+    if existing_label and new_label and new_label != existing_label:
+        st.warning("⚠️ New dataset name differs from the current one.")
+    return st.radio(
+        "Choose how to handle the existing dataset:",
+        ["Overwrite existing dataset", "Create a new version", "Cancel"],
+        index=0,
+        key=key,
+        help="Overwrite replaces the current dataset. Versioning archives the current dataset metadata before replacing it.",
+        horizontal=True
+    )
 
 # Initialize session state
 init_session_state()
@@ -50,27 +89,27 @@ df_builtin = None
 if selected_dataset != 'None (Upload CSV)':
     # Check if data already exists
     existing_data = get_data()
-    replace_existing = False
+    replace_action = None
     if existing_data is not None:
-        replace_existing = st.checkbox(
-            "Replace existing dataset",
-            value=False,
-            key="replace_dataset_checkbox",
-            help="Check to overwrite current dataset"
-        )
+        replace_action = _choose_replace_action("replace_dataset_action", selected_dataset)
     
     if st.button("Generate Dataset", key="generate_dataset_button"):
-        if existing_data is not None and not replace_existing:
-            st.warning("⚠️ Dataset already loaded. Check 'Replace existing dataset' to overwrite.")
+        if existing_data is not None and replace_action == "Cancel":
+            st.info("ℹ️ Dataset replacement cancelled.")
         else:
+            if existing_data is not None and replace_action == "Create a new version":
+                _archive_current_dataset("versioned")
+            reset_data_dependent_state()
             generator = get_builtin_datasets()[selected_dataset]
             df_builtin = generator(random_state=st.session_state.get('random_seed', 42))
             set_data(df_builtin)
-            st.session_state.data_source = f"Built-in: {selected_dataset}"
+            dataset_id = _next_dataset_id()
+            st.session_state.dataset_id = dataset_id
+            st.session_state.data_filename = selected_dataset
+            st.session_state.data_source = f"Built-in: {selected_dataset} (v{dataset_id})"
             # Reconcile state with new data
             reconcile_state_with_df(df_builtin, st.session_state)
             st.success(f"✅ Generated {len(df_builtin)} rows")
-            st.rerun()
 
 # File upload
 st.header("📤 Upload CSV File")
@@ -87,31 +126,35 @@ df = get_data()
 # Handle new uploads
 if uploaded_file is not None:
     existing_data = get_data()
-    replace_existing = False
+    replace_action = None
     if existing_data is not None:
-        replace_existing = st.checkbox(
-            "Replace existing dataset",
-            value=False,
-            key="replace_upload_checkbox",
-            help="Check to overwrite current dataset"
-        )
+        replace_action = _choose_replace_action("replace_upload_action", uploaded_file.name)
     
-    if existing_data is None or replace_existing:
+    if existing_data is None or replace_action != "Cancel":
         try:
             with st.spinner("Loading data..."):
                 df = load_and_preview_csv(uploaded_file)
+                if existing_data is not None and replace_action == "Create a new version":
+                    _archive_current_dataset("versioned")
+                if existing_data is not None:
+                    reset_data_dependent_state()
                 set_data(df)
-                st.session_state.data_source = "Uploaded CSV"
+                dataset_id = _next_dataset_id()
+                st.session_state.dataset_id = dataset_id
+                st.session_state.data_filename = uploaded_file.name
+                st.session_state.data_source = f"Uploaded CSV: {uploaded_file.name} (v{dataset_id})"
                 # Reconcile state with new data
                 reconcile_state_with_df(df, st.session_state)
                 st.success(f"✅ Loaded {len(df):,} rows × {len(df.columns)} columns")
-                st.rerun()
         except Exception as e:
             st.error(f"❌ Error loading data: {str(e)}")
             logger.exception(e)
             df = None
+    elif existing_data is not None and replace_action == "Cancel":
+        st.info("ℹ️ Upload ignored. Existing dataset preserved.")
 
-# Use existing data or builtin
+# Use latest from session state (updated by built-in or upload)
+df = get_data()
 if df is None and df_builtin is not None:
     df = df_builtin
 
@@ -295,11 +338,13 @@ if df is not None:
         col1, col2 = st.columns(2)
         
         with col1:
-            # Target selection - use existing or default
-            target_default_idx = 0
+            # Target selection - use existing or default (first numeric when none)
             if existing_target and existing_target in numeric_cols:
                 target_default_idx = numeric_cols.index(existing_target) + 1
-            
+            elif numeric_cols:
+                target_default_idx = 1  # first numeric so target/features autopopulate after upload
+            else:
+                target_default_idx = 0
             target_col = st.selectbox(
                 "Target Variable",
                 options=[''] + numeric_cols,
@@ -554,9 +599,16 @@ if df is not None:
             
             # Check for unit issues
             if df is not None and target_col:
-                signals = compute_dataset_signals(df, target_col, task_type_final, cohort_type_final, entity_id_final)
-                if signals.unit_sanity_flags:
-                    next_steps.append(f"⚖️ **Possible unit mismatch** detected → Run 'Physiologic Plausibility Check' in EDA page")
+                signals = compute_dataset_signals(
+                    df,
+                    target_col,
+                    task_type_final,
+                    cohort_type_final,
+                    entity_id_final,
+                    outlier_method=st.session_state.get("eda_outlier_method", "iqr")
+                )
+                if signals.physio_plausibility_flags:
+                    next_steps.append("⚖️ **Physiologic plausibility flags** detected → Run 'Physiologic Plausibility Check' in EDA page")
             
             # Check for longitudinal
             if cohort_type_final == 'longitudinal' and entity_id_final:

@@ -6,6 +6,9 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Literal
 from dataclasses import dataclass, field
+from ml.clinical_units import infer_unit
+from ml.physiology_reference import load_reference_bundle, match_variable_key, get_reference_interval
+from ml.outliers import detect_outliers
 from scipy import stats
 from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
 
@@ -31,7 +34,7 @@ class DatasetSignals:
     leakage_flags: List[str] = field(default_factory=list)
     leakage_candidate_cols: List[str] = field(default_factory=list)
     collinearity_summary: Dict = field(default_factory=dict)
-    unit_sanity_flags: List[str] = field(default_factory=list)
+    physio_plausibility_flags: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
 
@@ -57,7 +60,8 @@ def compute_dataset_signals(
     task_type_final: Optional[str],
     cohort_type_final: Optional[str],
     entity_id_final: Optional[str],
-    sample_size: int = 5000
+    sample_size: int = 5000,
+    outlier_method: str = "iqr"
 ) -> DatasetSignals:
     """
     Compute dataset signals for EDA recommendations.
@@ -136,15 +140,8 @@ def compute_dataset_signals(
                 signals.target_stats['skew'] = stats.skew(target_series)
                 signals.target_stats['kurtosis'] = stats.kurtosis(target_series)
                 
-                # Outlier rate (IQR method)
-                Q1 = target_series.quantile(0.25)
-                Q3 = target_series.quantile(0.75)
-                IQR = Q3 - Q1
-                if IQR > 0:
-                    outliers = ((target_series < (Q1 - 1.5 * IQR)) | (target_series > (Q3 + 1.5 * IQR))).sum()
-                    signals.target_stats['outlier_rate'] = outliers / len(target_series)
-                else:
-                    signals.target_stats['outlier_rate'] = 0.0
+                outlier_mask, _ = detect_outliers(target_series, method=outlier_method)
+                signals.target_stats['outlier_rate'] = float(outlier_mask.sum() / len(target_series)) if len(target_series) > 0 else 0.0
             elif task_type_final == 'classification':
                 value_counts = target_series.value_counts()
                 signals.target_stats['class_counts'] = value_counts.to_dict()
@@ -187,33 +184,26 @@ def compute_dataset_signals(
                     if corr_val > 0.85:
                         signals.collinearity_summary['high_corr_pairs'].append((col1, col2, corr_val))
     
-    # Unit sanity flags (lightweight heuristics for medical/nutritional data)
-    medical_patterns = {
-        'glucose': (3.5, 25.0, 70, 500),  # (min_mmol, max_mmol, min_mgdl, max_mgdl)
-        'cholesterol': (2.0, 10.0, 80, 400),
-        'triglyceride': (0.5, 5.0, 50, 500),
-        'hba1c': (4.0, 15.0, None, None),  # %
-        'bmi': (15.0, 50.0, None, None),
-        'waist': (50, 150, None, None),  # cm
-        'weight': (30, 200, None, None),  # kg
-        'height': (100, 220, None, None),  # cm
-    }
-    
+    # Empirical plausibility flags (NHANES percentile reference)
+    reference_bundle = load_reference_bundle()
+    nhanes_ref = reference_bundle["nhanes"]
     for col in signals.numeric_cols:
-        col_lower = col.lower()
-        median_val = df[col].median()
-        
-        for pattern, (min_mmol, max_mmol, min_mgdl, max_mgdl) in medical_patterns.items():
-            if pattern in col_lower:
-                if median_val < min_mmol:
-                    signals.unit_sanity_flags.append(
-                        f"{col}: median={median_val:.1f}, possible mmol/L (expected {min_mmol}-{max_mmol})"
-                    )
-                elif min_mgdl and median_val > max_mgdl:
-                    signals.unit_sanity_flags.append(
-                        f"{col}: median={median_val:.1f}, possible mg/dL or unit issue (expected <{max_mgdl})"
-                    )
-                break
+        var_key = match_variable_key(col, nhanes_ref)
+        if not var_key:
+            continue
+        col_data = df[col].dropna()
+        if len(col_data) == 0:
+            continue
+        inferred_unit_info = infer_unit(col, col_data)
+        ref_interval = get_reference_interval(nhanes_ref, var_key)
+        if inferred_unit_info.get('conversion_factor') and ref_interval:
+            ref_low, ref_high, ref_unit = ref_interval
+            converted = col_data * inferred_unit_info['conversion_factor']
+            out_rate = ((converted < ref_low) | (converted > ref_high)).sum() / len(converted)
+            if out_rate > 0.05:
+                signals.physio_plausibility_flags.append(
+                    f"{col}: {out_rate:.1%} outside NHANES reference ({ref_low}-{ref_high} {ref_unit})"
+                )
     
     return signals
 

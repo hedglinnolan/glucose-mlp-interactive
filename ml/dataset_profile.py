@@ -15,6 +15,9 @@ from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 import pandas as pd
 from enum import Enum
+from ml.clinical_units import infer_unit
+from ml.physiology_reference import load_reference_bundle, match_variable_key, get_reference_interval
+from ml.outliers import detect_outliers
 
 
 class DataSufficiencyLevel(Enum):
@@ -142,6 +145,8 @@ class DatasetProfile:
     # Numeric issues
     features_with_outliers: List[str] = field(default_factory=list)
     highly_skewed_features: List[str] = field(default_factory=list)
+    physio_plausibility_flags: List[str] = field(default_factory=list)
+    physio_reference_version: Optional[str] = None
     
     # Data sufficiency assessment
     data_sufficiency: DataSufficiencyLevel = DataSufficiencyLevel.ADEQUATE
@@ -159,7 +164,7 @@ class DatasetProfile:
     profile_timestamp: Optional[str] = None
 
 
-def compute_feature_profile(df: pd.DataFrame, col: str, n: int) -> FeatureProfile:
+def compute_feature_profile(df: pd.DataFrame, col: str, n: int, outlier_method: str = "iqr") -> FeatureProfile:
     """Compute profile for a single feature."""
     series = df[col]
     dtype = str(series.dtype)
@@ -200,13 +205,9 @@ def compute_feature_profile(df: pd.DataFrame, col: str, n: int) -> FeatureProfil
                 except:
                     profile.skewness = 0.0
             
-            # Outlier detection (IQR method)
-            q1, q3 = valid.quantile([0.25, 0.75])
-            iqr = q3 - q1
-            lower_bound = q1 - 1.5 * iqr
-            upper_bound = q3 + 1.5 * iqr
-            outliers = ((valid < lower_bound) | (valid > upper_bound))
-            profile.outlier_count = int(outliers.sum())
+            # Outlier detection (configurable method)
+            outlier_mask, _ = detect_outliers(valid, method=outlier_method)
+            profile.outlier_count = int(outlier_mask.sum())
             profile.outlier_rate = profile.outlier_count / len(valid) if len(valid) > 0 else 0.0
             profile.has_outliers = profile.outlier_rate > 0.01  # >1% outliers
     
@@ -221,7 +222,7 @@ def compute_feature_profile(df: pd.DataFrame, col: str, n: int) -> FeatureProfil
     return profile
 
 
-def compute_target_profile(df: pd.DataFrame, target_col: str, task_type: str) -> TargetProfile:
+def compute_target_profile(df: pd.DataFrame, target_col: str, task_type: str, outlier_method: str = "iqr") -> TargetProfile:
     """Compute profile for the target variable."""
     series = df[target_col]
     n_unique = series.nunique()
@@ -248,11 +249,9 @@ def compute_target_profile(df: pd.DataFrame, target_col: str, task_type: str) ->
                 except:
                     profile.skewness = 0.0
             
-            # Outlier detection
-            q1, q3 = valid.quantile([0.25, 0.75])
-            iqr = q3 - q1
-            outliers = ((valid < q1 - 1.5*iqr) | (valid > q3 + 1.5*iqr))
-            profile.outlier_rate = float(outliers.sum() / len(valid)) if len(valid) > 0 else 0.0
+            # Outlier detection (configurable method)
+            outlier_mask, _ = detect_outliers(valid, method=outlier_method)
+            profile.outlier_rate = float(outlier_mask.sum() / len(valid)) if len(valid) > 0 else 0.0
             profile.has_outliers = profile.outlier_rate > 0.05
     
     else:  # classification
@@ -482,6 +481,24 @@ def generate_warnings(profile: DatasetProfile) -> List[DataWarning]:
                 "Tree models are robust to outliers"
             ]
         ))
+
+    # Physiologic plausibility warning (NHANES reference)
+    if profile.physio_plausibility_flags:
+        warnings.append(DataWarning(
+            category="physiologic_plausibility",
+            level=WarningLevel.CAUTION,
+            short_message=f"{len(profile.physio_plausibility_flags)} physiologic flags",
+            detailed_message=(
+                "Empirical plausibility checks found values outside NHANES reference intervals. "
+                "These checks are based on population distributions, not clinical guidance."
+            ),
+            affected_models=["All Models"],
+            suggested_actions=[
+                "Verify units and data entry",
+                "Review plausible ranges for affected features",
+                "Consider unit harmonization or plausibility gating"
+            ]
+        ))
     
     return warnings
 
@@ -490,7 +507,8 @@ def compute_dataset_profile(
     df: pd.DataFrame,
     target_col: Optional[str] = None,
     feature_cols: Optional[List[str]] = None,
-    task_type: Optional[str] = None
+    task_type: Optional[str] = None,
+    outlier_method: str = "iqr"
 ) -> DatasetProfile:
     """
     Compute a comprehensive dataset profile.
@@ -532,7 +550,7 @@ def compute_dataset_profile(
     highly_skewed = []
     
     for col in feature_cols:
-        fp = compute_feature_profile(df, col, n)
+        fp = compute_feature_profile(df, col, n, outlier_method=outlier_method)
         feature_profiles[col] = fp
         
         if fp.is_high_cardinality:
@@ -567,7 +585,7 @@ def compute_dataset_profile(
             else:
                 task_type = 'regression'
         
-        target_profile = compute_target_profile(df, target_col, task_type)
+        target_profile = compute_target_profile(df, target_col, task_type, outlier_method=outlier_method)
         if task_type == 'classification' and target_profile.minority_class_size:
             minority_class_size = target_profile.minority_class_size
     
@@ -582,6 +600,28 @@ def compute_dataset_profile(
     if task_type == 'classification' and minority_class_size is not None and p > 0:
         events_per_variable = minority_class_size / p
     
+    # Physiologic plausibility flags (NHANES reference only)
+    reference_bundle = load_reference_bundle()
+    nhanes_ref = reference_bundle["nhanes"]
+    physio_flags = []
+    for col in numeric_cols:
+        var_key = match_variable_key(col, nhanes_ref)
+        if not var_key:
+            continue
+        col_data = df[col].dropna()
+        if len(col_data) == 0:
+            continue
+        inferred_unit_info = infer_unit(col, col_data)
+        ref_interval = get_reference_interval(nhanes_ref, var_key)
+        if inferred_unit_info.get('conversion_factor') and ref_interval:
+            ref_low, ref_high, ref_unit = ref_interval
+            converted = col_data * inferred_unit_info['conversion_factor']
+            out_rate = ((converted < ref_low) | (converted > ref_high)).sum() / len(converted)
+            if out_rate > 0.05:
+                physio_flags.append(
+                    f"{col}: {out_rate:.1%} outside NHANES reference ({ref_low}-{ref_high} {ref_unit})"
+                )
+
     # Create profile
     profile = DatasetProfile(
         n_rows=n,
@@ -601,6 +641,8 @@ def compute_dataset_profile(
         id_like_features=id_like_features,
         features_with_outliers=features_with_outliers,
         highly_skewed_features=highly_skewed,
+        physio_plausibility_flags=physio_flags,
+        physio_reference_version=nhanes_ref.get("version"),
         data_sufficiency=data_sufficiency,
         sufficiency_narrative=sufficiency_narrative,
         profile_timestamp=datetime.now().isoformat()

@@ -1,5 +1,5 @@
-# Run script for Windows PowerShell
-# This script activates the virtual environment and runs the Streamlit app
+# Run script for Windows PowerShell (uses uv)
+# Activates the virtual environment and runs the Streamlit app
 
 Write-Host "🚀 Starting Regression Model Trainer..." -ForegroundColor Cyan
 
@@ -10,21 +10,16 @@ if (-Not (Test-Path ".venv")) {
     exit 1
 }
 
-# Activate virtual environment
-Write-Host "🔌 Activating virtual environment..." -ForegroundColor Yellow
-& ".\.venv\Scripts\Activate.ps1"
-
-# Check if streamlit is installed
-$streamlitCheck = python -c "import streamlit" 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "❌ Streamlit not found in virtual environment!" -ForegroundColor Red
-    Write-Host "Installing dependencies..." -ForegroundColor Yellow
-    pip install -r requirements.txt
+# Check for uv
+$uvCmd = Get-Command uv -ErrorAction SilentlyContinue
+if (-Not $uvCmd) {
+    Write-Host "❌ uv not found! Install: irm https://astral.sh/uv/install.ps1 | iex" -ForegroundColor Red
+    exit 1
 }
 
-# Run the app
+# Run the app (uv run uses .venv automatically)
 Write-Host "🌐 Starting Streamlit app..." -ForegroundColor Green
 Write-Host "The app will open in your browser at http://localhost:8501" -ForegroundColor Cyan
 Write-Host ""
 
-streamlit run app.py
+uv run streamlit run app.py

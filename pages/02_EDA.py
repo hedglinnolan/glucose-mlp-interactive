@@ -1,7 +1,6 @@
 """
 Page 02: Exploratory Data Analysis
 Shows summary stats, distributions, correlations, and target analysis.
-Includes intelligent Model Selection Coach with data-aware recommendations.
 """
 import streamlit as st
 import pandas as pd
@@ -18,6 +17,15 @@ from utils.storyline import render_progress_indicator, add_insight, get_insights
 from data_processor import get_numeric_columns
 from ml.eda_recommender import compute_dataset_signals, recommend_eda, DatasetSignals
 from ml import eda_actions
+from ml.plot_narrative import (
+    narrative_eda_linearity,
+    narrative_eda_residuals,
+    narrative_eda_influence,
+    narrative_eda_normality,
+    narrative_eda_sufficiency,
+    narrative_eda_scaling,
+    narrative_eda_multicollinearity,
+)
 
 init_session_state()
 
@@ -48,17 +56,34 @@ task_type_final = task_type_detection.final if task_type_detection.final else da
 cohort_type_final = cohort_structure_detection.final if cohort_structure_detection.final else 'cross_sectional'
 entity_id_final = cohort_structure_detection.entity_id_final
 
+# EDA settings
+with st.expander("⚙️ EDA Settings", expanded=False):
+    outlier_method = st.selectbox(
+        "Outlier detection method",
+        ["iqr", "mad", "zscore", "percentile"],
+        index=0,
+        key="eda_outlier_method",
+        help="Choose how outliers are defined for EDA metrics and plots."
+    )
+    method_descriptions = {
+        "iqr": "IQR: Flags points outside Q1−1.5×IQR or Q3+1.5×IQR.",
+        "mad": "MAD: Uses median absolute deviation with modified z-score threshold (robust).",
+        "zscore": "Z-score: Flags points with |z| > 3 (assumes near-normal).",
+        "percentile": "Percentile: Flags points outside the 1st–99th percentiles."
+    }
+    st.caption(method_descriptions.get(outlier_method, ""))
+
 # ============================================================================
 # DATASET PROFILE - Compute comprehensive profile for intelligent coaching
 # ============================================================================
 @st.cache_data
-def compute_profile_cached(_df: pd.DataFrame, target: str, features: List[str], task_type: str):
+def compute_profile_cached(_df: pd.DataFrame, target: str, features: List[str], task_type: str, outlier_method: str):
     """Compute dataset profile with caching."""
     from ml.dataset_profile import compute_dataset_profile
-    return compute_dataset_profile(_df, target, features, task_type)
+    return compute_dataset_profile(_df, target, features, task_type, outlier_method)
 
 # Compute the dataset profile
-profile = compute_profile_cached(df, target_col, feature_cols, task_type_final)
+profile = compute_profile_cached(df, target_col, feature_cols, task_type_final, outlier_method)
 st.session_state['dataset_profile'] = profile  # Store for other pages
 
 # ============================================================================
@@ -133,314 +158,18 @@ if profile.warnings:
                 st.info(f"**{w.short_message}:** {w.detailed_message}")
 
 # ============================================================================
-# MODEL SELECTION COACH - Intelligent, Educational Assistant
+# Compute signals for EDA actions
 # ============================================================================
-st.markdown("---")
-st.header("🎓 Model Selection Coach")
-
-st.markdown("""
-The Model Selection Coach analyzes your dataset and recommends models based on:
-- **Sample size and feature count** — Some models need more data than others
-- **Feature types** — Numeric vs categorical, high cardinality
-- **Data quality** — Missing values, outliers, imbalance
-- **Task complexity** — Linear vs nonlinear relationships
-""")
-
-# Compute comprehensive coach recommendations
-@st.cache_data
-def compute_coach_cached(_profile_dict: dict):
-    """Compute coach recommendations with caching."""
-    from ml.model_coach import compute_model_recommendations
-    from ml.dataset_profile import DatasetProfile
-    # Reconstruct profile from dict for caching compatibility
-    return compute_model_recommendations(_profile_dict['_obj'])
-
-# Create a cacheable representation
-profile_cache_key = {
-    'n_rows': profile.n_rows,
-    'n_features': profile.n_features,
-    'task_type': profile.target_profile.task_type if profile.target_profile else None,
-    '_obj': profile  # Pass actual object
-}
-
-try:
-    from ml.model_coach import compute_model_recommendations, RecommendationBucket, TrainingTimeTier
-    coach_output = compute_model_recommendations(profile)
-    st.session_state['coach_output'] = coach_output
-except Exception as e:
-    st.error(f"Error computing recommendations: {e}")
-    coach_output = None
-
-# Custom CSS for coach UI
-st.markdown("""
-<style>
-.coach-section {
-    border: 2px solid #e8e8e8;
-    border-radius: 12px;
-    padding: 1.5rem;
-    margin: 1rem 0;
-    background: linear-gradient(180deg, #fafafa 0%, #ffffff 100%);
-}
-.coach-bucket-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-}
-.bucket-recommended { border-left: 4px solid #28a745; }
-.bucket-worth-trying { border-left: 4px solid #ffc107; }
-.bucket-not-recommended { border-left: 4px solid #dc3545; }
-.model-card {
-    background: white;
-    border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    padding: 1rem;
-    margin: 0.5rem 0;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-}
-.model-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.5rem;
-}
-.time-badge {
-    font-size: 0.75rem;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-weight: 600;
-}
-.time-fast { background: #d4edda; color: #155724; }
-.time-medium { background: #fff3cd; color: #856404; }
-.time-slow { background: #f8d7da; color: #721c24; }
-.plain-explanation {
-    background: #f8f9fa;
-    border-left: 3px solid #007bff;
-    padding: 1rem;
-    margin: 1rem 0;
-    font-size: 0.95rem;
-    line-height: 1.6;
-}
-</style>
-""", unsafe_allow_html=True)
-
-if coach_output:
-    # Tabs for different views
-    tab_summary, tab_recommended, tab_worth_trying, tab_not_recommended, tab_preprocessing, tab_advanced_eda = st.tabs([
-        "📋 Summary",
-        f"✅ Recommended ({len(coach_output.recommended_models)})",
-        f"🔄 Worth Trying ({len(coach_output.worth_trying_models)})",
-        f"⛔ Not Recommended ({len(coach_output.not_recommended_models)})",
-        "🔧 Preprocessing",
-        "🔬 Advanced EDA"
-    ])
-    
-    # Summary Tab
-    with tab_summary:
-        st.markdown(f"### {coach_output.dataset_summary}")
-        
-        # Plain language narrative
-        st.markdown(f'<div class="plain-explanation">{coach_output.data_sufficiency_narrative}</div>', 
-                   unsafe_allow_html=True)
-        
-        # Quick recommendation summary
-        st.markdown("### Quick Recommendations")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("**✅ Recommended Models**")
-            for rec in coach_output.recommended_models[:5]:
-                time_class = f"time-{rec.training_time.value}"
-                st.markdown(f"- **{rec.model_name}** <span class='time-badge {time_class}'>{rec.training_time.value}</span>", 
-                           unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("**🔄 Worth Trying**")
-            for rec in coach_output.worth_trying_models[:5]:
-                st.markdown(f"- {rec.model_name}")
-        
-        with col3:
-            st.markdown("**⛔ Not Recommended**")
-            for rec in coach_output.not_recommended_models[:3]:
-                st.markdown(f"- {rec.model_name}")
-        
-        # Key warnings
-        if coach_output.warnings_summary:
-            st.markdown("### ⚠️ Key Warnings")
-            for warning in coach_output.warnings_summary[:3]:
-                st.warning(warning)
-    
-    # Recommended Models Tab
-    with tab_recommended:
-        st.markdown("### ✅ Recommended Models")
-        st.markdown("These models are well-suited to your dataset based on sample size, feature types, and data quality.")
-        
-        if not coach_output.recommended_models:
-            st.info("No models strongly recommended. Check the 'Worth Trying' tab.")
-        
-        for rec in coach_output.recommended_models:
-            with st.container():
-                st.markdown(f'<div class="model-card bucket-recommended">', unsafe_allow_html=True)
-                
-                col1, col2, col3 = st.columns([3, 1, 1])
-                with col1:
-                    st.markdown(f"### {rec.model_name}")
-                    st.caption(f"Group: {rec.display_name} | Key: `{rec.model_key}`")
-                with col2:
-                    time_emoji = {"fast": "⚡", "medium": "⏱️", "slow": "🐢"}.get(rec.training_time.value, "")
-                    st.metric("Training Time", f"{time_emoji} {rec.training_time.value.title()}")
-                with col3:
-                    interp_emoji = {"high": "📖", "medium": "📊", "low": "🔮"}.get(rec.interpretability, "")
-                    st.metric("Interpretability", f"{interp_emoji} {rec.interpretability.title()}")
-                
-                # Plain language summary
-                st.markdown(f'<div class="plain-explanation">{rec.plain_language_summary}</div>', 
-                           unsafe_allow_html=True)
-                
-                # Dataset fit
-                st.markdown(f"**Dataset Fit:** {rec.dataset_fit_summary}")
-                st.markdown(f"**Rationale:** {rec.rationale}")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if rec.strengths:
-                        st.markdown("**✅ Strengths:**")
-                        for s in rec.strengths:
-                            st.markdown(f"• {s}")
-                with col2:
-                    if rec.weaknesses or rec.risks:
-                        st.markdown("**⚠️ Considerations:**")
-                        for w in rec.weaknesses:
-                            st.markdown(f"• {w}")
-                        for r in rec.risks:
-                            st.markdown(f"• ⚠️ {r}")
-                
-                # Expandable details
-                with st.expander("When to use / When to avoid"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.markdown(f"**When to use:** {rec.when_to_use}")
-                    with col2:
-                        st.markdown(f"**When to avoid:** {rec.when_to_avoid}")
-                
-                with st.expander("Prerequisites"):
-                    st.markdown(f"• **Requires scaling:** {'Yes' if rec.requires_scaling else 'No'}")
-                    st.markdown(f"• **Requires categorical encoding:** {'Yes' if rec.requires_encoding else 'No'}")
-                    st.markdown(f"• **Handles missing values:** {'Yes' if rec.handles_missing else 'No (needs imputation)'}")
-                
-                # Select button
-                if st.button(f"Select {rec.model_key} for training", key=f"select_{rec.model_key}"):
-                    st.session_state[f'train_model_{rec.model_key}'] = True
-                    st.success(f"✅ {rec.model_name} selected for training!")
-                
-                st.markdown('</div>', unsafe_allow_html=True)
-                st.markdown("")  # spacing
-    
-    # Worth Trying Tab
-    with tab_worth_trying:
-        st.markdown("### 🔄 Worth Trying")
-        st.markdown("These models may work for your dataset but have some caveats. Consider them if recommended models underperform.")
-        
-        if not coach_output.worth_trying_models:
-            st.info("No models in this category.")
-        
-        for rec in coach_output.worth_trying_models:
-            with st.expander(f"**{rec.model_name}** ({rec.display_name})"):
-                st.markdown(f'<div class="plain-explanation">{rec.plain_language_summary}</div>', 
-                           unsafe_allow_html=True)
-                
-                st.markdown(f"**Rationale:** {rec.rationale}")
-                
-                if rec.risks:
-                    st.warning("**Risks:** " + "; ".join(rec.risks))
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"**When to use:** {rec.when_to_use}")
-                with col2:
-                    st.markdown(f"**When to avoid:** {rec.when_to_avoid}")
-                
-                if st.button(f"Select {rec.model_key}", key=f"select_wt_{rec.model_key}"):
-                    st.session_state[f'train_model_{rec.model_key}'] = True
-                    st.success(f"✅ {rec.model_name} selected!")
-    
-    # Not Recommended Tab
-    with tab_not_recommended:
-        st.markdown("### ⛔ Not Recommended")
-        st.markdown("These models are **not well-suited** for your current dataset. Use with caution.")
-        
-        if not coach_output.not_recommended_models:
-            st.success("All models are at least worth trying for your dataset!")
-        
-        for rec in coach_output.not_recommended_models:
-            with st.expander(f"**{rec.model_name}** — Why not recommended"):
-                st.markdown(f'<div class="plain-explanation">{rec.plain_language_summary}</div>', 
-                           unsafe_allow_html=True)
-                
-                st.error(f"**Why not recommended:** {rec.rationale}")
-                
-                if rec.risks:
-                    st.markdown("**Key risks:**")
-                    for r in rec.risks:
-                        st.markdown(f"• ⚠️ {r}")
-                
-                st.markdown(f"**When this model IS appropriate:** {rec.when_to_use}")
-    
-    # Preprocessing Tab
-    with tab_preprocessing:
-        st.markdown("### 🔧 Recommended Preprocessing")
-        st.markdown("Based on your dataset characteristics and the recommended models, here are preprocessing steps to consider.")
-        
-        if not coach_output.preprocessing_recommendations:
-            st.success("No critical preprocessing steps identified.")
-        
-        for prep in coach_output.preprocessing_recommendations:
-            priority_color = {"required": "🔴", "recommended": "🟡", "optional": "🟢"}.get(prep.priority, "⚪")
-            
-            with st.expander(f"{priority_color} **{prep.step_name}** ({prep.priority.upper()})"):
-                st.markdown(f"**Why:** {prep.rationale}")
-                
-                st.markdown(f'<div class="plain-explanation">{prep.plain_language_explanation}</div>', 
-                           unsafe_allow_html=True)
-                
-                st.markdown(f"**How to implement:** {prep.how_to_implement}")
-                
-                if prep.affected_model_families:
-                    st.caption(f"Affects: {', '.join(prep.affected_model_families)}")
-    
-    # Advanced EDA Tab
-    with tab_advanced_eda:
-        st.markdown("### 🔬 Advanced EDA by Model Family")
-        st.markdown("These analyses can help you better understand whether specific model families will work for your data.")
-        
-        st.markdown("#### 📊 Baseline EDA (Always Recommended)")
-        for eda_item in coach_output.baseline_eda:
-            st.markdown(f"• {eda_item}")
-        
-        st.markdown("---")
-        st.markdown("#### 🔍 Model-Family Specific EDA")
-        
-        for family, eda_items in coach_output.advanced_eda_by_family.items():
-            with st.expander(f"**{family}** — Advanced Analyses"):
-                st.markdown(f"*These analyses are particularly relevant if you plan to use {family}:*")
-                for item in eda_items:
-                    st.markdown(f"• {item}")
-
-# ============================================================================
-# LEGACY COACH (for backward compatibility with signals)
-# ============================================================================
-# Compute signals for legacy features
 @st.cache_data
 def compute_signals_cached(_df: pd.DataFrame, target: str, task_type: Optional[str], 
-                           cohort_type: Optional[str], entity_id: Optional[str]):
+                          cohort_type: Optional[str], entity_id: Optional[str], outlier_method: str):
     """Cached signal computation."""
     return compute_dataset_signals(
-        _df, target, task_type, cohort_type, entity_id
+        _df, target, task_type, cohort_type, entity_id, outlier_method=outlier_method
     )
 
 signals = compute_signals_cached(
-    df, target_col, task_type_final, cohort_type_final, entity_id_final
+    df, target_col, task_type_final, cohort_type_final, entity_id_final, outlier_method
 )
 
 # ============================================================================
@@ -458,155 +187,208 @@ else:
     st.info("💡 Run EDA analyses below to collect insights that will guide model selection and preprocessing.")
 
 # ============================================================================
-# EDA RECOMMENDATIONS ENGINE
+# EDA: UPFRONT (non–model-specific)
 # ============================================================================
-# Initialize EDA results storage
 if 'eda_results' not in st.session_state:
     st.session_state.eda_results = {}
 
-# Generate recommendations
-recommendations = recommend_eda(signals)
+st.header("🔬 Non–Model-Specific EDA")
+st.caption("Run these first. Plausibility and collinearity inform model choice and preprocessing.")
 
-# Display recommendations section
-st.header("🔍 Recommended EDA Analyses")
+def _run_and_show(action_id: str, title: str, run_action: str):
+    from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
+    key_run = f"upfront_run_{action_id}"
+    if st.button(f"▶️ Run {title}", key=key_run, type="primary"):
+        try:
+            action_func = getattr(eda_actions, run_action, None)
+            if action_func:
+                with st.spinner(f"Running {title}..."):
+                    result = action_func(df, target_col, feature_cols, signals, st.session_state)
+                    st.session_state.eda_results[action_id] = result
+                    st.rerun()
+            else:
+                st.error(f"Action '{run_action}' not found")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+    if action_id in st.session_state.eda_results:
+        result = st.session_state.eda_results[action_id]
+        for w in result.get('warnings', []):
+            st.warning(w)
+        findings = result.get('findings', [])[:2]
+        interp = "; ".join(findings) if findings else None
+        for idx, (fig_type, fig_data) in enumerate(result.get('figures', [])):
+            if fig_type == 'plotly':
+                st.plotly_chart(fig_data, use_container_width=True, key=f"upfront_plot_{action_id}_{idx}")
+            elif fig_type == 'table':
+                st.dataframe(fig_data, use_container_width=True, key=f"upfront_table_{action_id}_{idx}")
+        if interp:
+            st.markdown(f"**Interpretation:** {interp}")
+            stats_summary = "; ".join(result.get('findings', [])[:3])
+            ctx = build_llm_context(action_id, stats_summary, existing=interp, feature_names=feature_cols, sample_size=len(df) if df is not None else None, task_type=task_type_final if task_type_final else None)
+            render_interpretation_with_llm_button(
+                ctx, key=f"llm_upfront_{action_id}", result_session_key=f"llm_result_upfront_{action_id}",
+            )
 
-# Show top 5 by default, expander for all
-top_n = 5
-show_all = st.checkbox("Show all recommendations", value=False, key="show_all_recommendations")
-
-recs_to_show = recommendations if show_all else recommendations[:top_n]
-
-for rec in recs_to_show:
-    with st.container():
-        # Card-like container
-        st.markdown("---")
-        col1, col2 = st.columns([4, 1])
-        
-        with col1:
-            st.markdown(f"### {rec.title}")
-            cost_badge = {"low": "🟢 Low Cost", "medium": "🟡 Medium Cost", "high": "🔴 High Cost"}.get(rec.cost, "⚪ Unknown")
-            st.markdown(f"**Priority:** {rec.priority} | **Cost:** {cost_badge}")
-        
-        with col2:
-            # Run button
-            run_key = f"run_{rec.id}"
-            if st.button("▶️ Run", key=run_key, type="primary"):
-                # Execute action
-                try:
-                    action_func = getattr(eda_actions, rec.run_action, None)
-                    if action_func:
-                        with st.spinner(f"Running {rec.title}..."):
-                            result = action_func(df, target_col, feature_cols, signals, st.session_state)
-                            # Store results
-                            st.session_state.eda_results[rec.id] = result
-                            st.rerun()
-                    else:
-                        st.error(f"Action '{rec.run_action}' not found")
-                except Exception as e:
-                    st.error(f"Error running analysis: {str(e)}")
-                    st.session_state.eda_results[rec.id] = {
-                        'findings': [],
-                        'warnings': [f"Error: {str(e)}"],
-                        'figures': []
-                    }
-        
-        # Why recommended
-        with st.expander("Why recommended"):
-            for reason in rec.why:
-                st.write(f"• {reason}")
-        
-        # What you'll learn
-        with st.expander("What you'll learn"):
-            for item in rec.what_you_learn:
-                st.write(f"• {item}")
-        
-        # Model implications
-        with st.expander("Model implications"):
-            for item in rec.model_implications:
-                st.write(f"• {item}")
-        
-        # Educational explanation
-        if rec.description:
-            with st.expander("📚 Explain this analysis"):
-                st.markdown(rec.description)
-        
-        # Display results if available
-        if rec.id in st.session_state.eda_results:
-            result = st.session_state.eda_results[rec.id]
-            
-            st.markdown("**Results:**")
-            
-            # Findings
-            if result.get('findings'):
-                st.success("**Findings:**")
-                for finding in result['findings']:
-                    st.write(f"✓ {finding}")
-            
-            # Warnings
-            if result.get('warnings'):
-                for warning in result['warnings']:
-                    st.warning(warning)
-            
-            # Figures
-            if result.get('figures'):
-                for fig_type, fig_data in result['figures']:
-                    if fig_type == 'plotly':
-                        st.plotly_chart(fig_data, use_container_width=True)
-                    elif fig_type == 'table':
-                        st.dataframe(fig_data, use_container_width=True)
+col_plaus, col_coll = st.columns(2)
+with col_plaus:
+    st.subheader("Physiologic Plausibility Check")
+    _run_and_show("plausibility_check", "Physiologic Plausibility", "plausibility_check")
+with col_coll:
+    st.subheader("Collinearity Heatmap")
+    _run_and_show("collinearity_map", "Collinearity Heatmap", "collinearity_map")
 
 st.markdown("---")
 
 # ============================================================================
-# MANUAL MODE
+# EDA: MODEL-FAMILY–SPECIFIC (primary)
 # ============================================================================
-st.header("🔧 Manual Mode - Run Any Analysis")
+# (description, action_id) per family; each task runs and shows “what am I looking at”
+FAMILY_TASKS: Dict[str, List[tuple]] = {
+    "Linear Models": [
+        ("Check linearity: scatter plots of features vs target", "linearity_scatter"),
+        ("Residual analysis: look for patterns in residuals", "residual_analysis"),
+        ("Multicollinearity check: correlation matrix, VIF if available", "multicollinearity_vif"),
+        ("Influence diagnostics: identify high-leverage points", "influence_diagnostics"),
+        ("Normality of residuals (for inference, not prediction)", "normality_residuals"),
+    ],
+    "Tree-Based Models": [
+        ("Feature interactions: look for non-additive effects", "interaction_analysis"),
+        ("Nonlinearity indicators and monotonic trends: binned averages by feature", "dose_response_trends"),
+        ("Outlier influence on target", "outlier_influence"),
+        ("Target profile", "target_profile"),
+    ],
+    "Neural Networks": [
+        ("Data sufficiency check: at least 20× samples per feature recommended", "data_sufficiency_check"),
+        ("Feature scaling necessity: check feature value ranges", "feature_scaling_check"),
+        ("Leakage detection: features too correlated with target", "leakage_scan"),
+        ("Target profile", "target_profile"),
+        ("Missingness scan", "missingness_scan"),
+    ],
+    "Boosting": [
+        ("Target profile", "target_profile"),
+        ("Outlier influence on target", "outlier_influence"),
+        ("Interaction detection: tree-based interaction tests", "interaction_analysis"),
+        ("Nonlinearity indicators: binned averages by feature", "dose_response_trends"),
+    ],
+}
 
-action_names = [
-    'plausibility_check',
-    'missingness_scan',
-    'cohort_split_guidance',
-    'target_profile',
-    'dose_response_trends',
-    'collinearity_map',
-    'quick_probe_baselines'
-]
+ACTION_NARRATIVE = {
+    "linearity_scatter": narrative_eda_linearity,
+    "residual_analysis": narrative_eda_residuals,
+    "influence_diagnostics": narrative_eda_influence,
+    "normality_residuals": narrative_eda_normality,
+    "multicollinearity_vif": narrative_eda_multicollinearity,
+    "data_sufficiency_check": narrative_eda_sufficiency,
+    "feature_scaling_check": narrative_eda_scaling,
+}
 
-selected_action = st.selectbox("Select analysis to run", action_names, key="eda_manual_action_select")
+st.header("🔍 Model-Family–Specific EDA")
+st.caption("Run all analyses for a family, or run individual tasks. Results include a short “What am I looking at” narrative.")
 
-if st.button("Run Selected Analysis", key="eda_manual_run_button"):
-    try:
-        action_func = getattr(eda_actions, selected_action, None)
-        if action_func:
-            with st.spinner(f"Running {selected_action}..."):
-                result = action_func(df, target_col, feature_cols, signals, st.session_state)
-                st.session_state.eda_results[f"manual_{selected_action}"] = result
-                st.rerun()
-        else:
-            st.error(f"Action '{selected_action}' not found")
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
+for family, tasks in FAMILY_TASKS.items():
+    with st.expander(f"**{family}**", expanded=False):
+        for desc, action_id in tasks:
+            st.markdown(f"• {desc}")
+        run_list = [(d, a) for d, a in tasks if getattr(eda_actions, a, None) is not None]
+        if not run_list:
+            st.caption("No runnable actions for this family.")
+            continue
+        run_all_key = f"run_all_{family.replace(' ', '_')}"
+        if st.button("▶️ Run All", key=run_all_key, type="primary"):
+            for _desc, act in run_list:
+                try:
+                    action_func = getattr(eda_actions, act, None)
+                    if action_func:
+                        result = action_func(df, target_col, feature_cols, signals, st.session_state)
+                        st.session_state.eda_results[f"family_{family}_{act}"] = result
+                except Exception as e:
+                    st.session_state.eda_results[f"family_{family}_{act}"] = {
+                        "findings": [], "warnings": [str(e)], "figures": [], "stats": {}
+                    }
+            st.rerun()
+        for desc, act in run_list:
+            fkey = f"family_{family}_{act}"
+            if fkey not in st.session_state.eda_results:
+                continue
+            result = st.session_state.eda_results[fkey]
+            st.markdown(f"**{desc}**")
+            for w in result.get("warnings", []):
+                st.warning(w)
+            findings = result.get("findings", [])
+            stats = result.get("stats", {})
+            nar_fn = ACTION_NARRATIVE.get(act)
+            if nar_fn:
+                interp = nar_fn(stats, findings)
+            else:
+                interp = "; ".join(findings[:2]) if findings else None
+            for idx, (fig_type, fig_data) in enumerate(result.get("figures", [])):
+                if fig_type == "plotly":
+                    st.plotly_chart(fig_data, use_container_width=True, key=f"eda_plot_{fkey}_{idx}")
+                elif fig_type == "table":
+                    st.dataframe(fig_data, use_container_width=True, key=f"eda_table_{fkey}_{idx}")
+            if interp:
+                st.markdown(f"**Interpretation:** {interp}")
+            elif findings and result.get("figures"):
+                st.markdown(f"**Interpretation:** {'; '.join(findings[:2])}")
+            if (interp or findings) and result.get("figures"):
+                from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
+                stats_summary = "; ".join(findings[:3]) if findings else (interp or "")
+                ctx = build_llm_context(act, stats_summary, existing=interp or "; ".join(findings[:2]) if findings else "", feature_names=feature_cols, sample_size=len(df) if df is not None else None, task_type=task_type_final or None)
+                render_interpretation_with_llm_button(
+                    ctx, key=f"llm_family_{family}_{act}", result_session_key=f"llm_result_family_{family}_{act}",
+                )
+            st.markdown("---")
 
-# Show manual results
-manual_key = f"manual_{selected_action}"
-if manual_key in st.session_state.eda_results:
-    result = st.session_state.eda_results[manual_key]
-    st.markdown("**Results:**")
-    
-    if result.get('findings'):
-        for finding in result['findings']:
-            st.write(f"✓ {finding}")
-    
-    if result.get('warnings'):
-        for warning in result['warnings']:
-            st.warning(warning)
-    
-    if result.get('figures'):
-        for fig_type, fig_data in result['figures']:
+st.markdown("---")
+
+# ============================================================================
+# EDA: OTHER ADVANCED (dropdown)
+# ============================================================================
+upfront_and_family = {"plausibility_check", "collinearity_map"}
+for _tasks in FAMILY_TASKS.values():
+    for _d, aid in _tasks:
+        upfront_and_family.add(aid)
+OTHER_ACTIONS = [a for a in [
+    "missingness_scan", "cohort_split_guidance", "leakage_scan", "quick_probe_baselines"
+] if a not in upfront_and_family and getattr(eda_actions, a, None) is not None]
+
+st.header("🔧 Other Advanced Analyses")
+if OTHER_ACTIONS:
+    other_select = st.selectbox("Select analysis to run", OTHER_ACTIONS, key="eda_other_select")
+    if st.button("▶️ Run Selected", key="eda_other_run"):
+        try:
+            action_func = getattr(eda_actions, other_select, None)
+            if action_func:
+                with st.spinner(f"Running {other_select}..."):
+                    result = action_func(df, target_col, feature_cols, signals, st.session_state)
+                    st.session_state.eda_results[f"other_{other_select}"] = result
+                    st.rerun()
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+    other_key = f"other_{other_select}"
+    if other_key in st.session_state.eda_results:
+        result = st.session_state.eda_results[other_key]
+        for w in result.get('warnings', []):
+            st.warning(w)
+        findings = result.get('findings', [])[:2]
+        interp = "; ".join(findings) if findings else None
+        for idx, (fig_type, fig_data) in enumerate(result.get('figures', [])):
             if fig_type == 'plotly':
-                st.plotly_chart(fig_data, use_container_width=True)
+                st.plotly_chart(fig_data, use_container_width=True, key=f"other_plot_{other_select}_{idx}")
             elif fig_type == 'table':
-                st.dataframe(fig_data, use_container_width=True)
+                st.dataframe(fig_data, use_container_width=True, key=f"other_table_{other_select}_{idx}")
+        if interp:
+            st.markdown(f"**Interpretation:** {interp}")
+            from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
+            stats_summary = "; ".join(result.get('findings', [])[:3])
+            ctx = build_llm_context(other_select, stats_summary, existing=interp, feature_names=feature_cols, sample_size=len(df) if df is not None else None, task_type=task_type_final or None)
+            render_interpretation_with_llm_button(
+                ctx, key=f"llm_other_{other_select}", result_session_key=f"llm_result_other_{other_select}",
+            )
+else:
+    st.caption("No additional analyses in this category.")
+
+st.markdown("---")
 
 # ============================================================================
 # DATASET SIGNALS EXPLAINER
@@ -619,6 +401,7 @@ with st.expander("📊 Dataset Signals Detail"):
     st.write(f"• Categorical columns: {len(signals.categorical_cols)}")
     st.write(f"• High missing columns (>5%): {len(signals.high_missing_cols)}")
     st.write(f"• Duplicate row rate: {signals.duplicate_row_rate:.1%}")
+    st.write(f"• Outlier method: {outlier_method.upper()}")
     
     if signals.target_stats:
         st.markdown("**Target Statistics:**")
@@ -632,9 +415,9 @@ with st.expander("📊 Dataset Signals Detail"):
         st.markdown("**Collinearity:**")
         st.write(f"• Max correlation: {signals.collinearity_summary.get('max_corr', 0):.3f}")
     
-    if signals.unit_sanity_flags:
-        st.markdown("**Unit Sanity Flags:**")
-        for flag in signals.unit_sanity_flags:
+    if signals.physio_plausibility_flags:
+        st.markdown("**Physiologic Plausibility Flags (NHANES):**")
+        for flag in signals.physio_plausibility_flags:
             st.write(f"• {flag}")
 
 st.markdown("---")
@@ -686,35 +469,7 @@ for i in range(0, n_features_show, cols_per_row):
                 fig = px.histogram(df, x=feat, nbins=20, title=feat)
                 st.plotly_chart(fig, use_container_width=True)
 
-# Correlation heatmap
-st.header("🔗 Correlation Analysis")
-numeric_cols = get_numeric_columns(df)
-corr_cols = [c for c in feature_cols + [target_col] if c in numeric_cols]
-
-if len(corr_cols) > 1:
-    corr_matrix = df[corr_cols].corr()
-    fig_heatmap = px.imshow(
-        corr_matrix,
-        text_auto=True,
-        aspect="auto",
-        title="Correlation Heatmap",
-        color_continuous_scale='RdBu',
-        zmin=-1, zmax=1
-    )
-    st.plotly_chart(fig_heatmap, use_container_width=True)
-    
-    # Target vs feature correlations
-    st.subheader("Target-Feature Correlations")
-    target_corrs = corr_matrix[target_col].drop(target_col).sort_values(key=abs, ascending=False)
-    fig_bar = px.bar(
-        x=target_corrs.index,
-        y=target_corrs.values,
-        title=f"Correlation with {target_col}",
-        labels={'x': 'Feature', 'y': 'Correlation'}
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-# Target vs feature plots
+# Target vs feature plots (collinearity heatmap is upfront)
 st.header("🎯 Target vs Features")
 
 # Regression: scatter plots

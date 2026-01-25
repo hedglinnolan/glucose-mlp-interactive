@@ -126,6 +126,47 @@ def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray,
     return fig
 
 
+def plot_bland_altman(
+    a: np.ndarray,
+    b: np.ndarray,
+    title: str = "Bland–Altman Plot",
+    label_a: str = "Method A",
+    label_b: str = "Method B"
+) -> go.Figure:
+    """
+    Bland–Altman plot: agreement between two measurement methods.
+    x = (a + b) / 2 (mean), y = a - b (difference).
+    Shows mean difference and limits of agreement (mean ± 1.96 * std).
+    """
+    a = np.asarray(a).ravel()
+    b = np.asarray(b).ravel()
+    mean_ab = (a + b) / 2
+    diff = a - b
+    mean_diff = float(np.nanmean(diff))
+    std_diff = float(np.nanstd(diff))
+    loa_low = mean_diff - 1.96 * std_diff
+    loa_high = mean_diff + 1.96 * std_diff
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=mean_ab,
+        y=diff,
+        mode='markers',
+        marker=dict(size=5, opacity=0.6, color='blue'),
+        name='Difference'
+    ))
+    fig.add_hline(y=mean_diff, line_dash='solid', line_color='green', annotation_text=f'Mean diff: {mean_diff:.3f}')
+    fig.add_hline(y=loa_low, line_dash='dash', line_color='gray', annotation_text=f'LoA −1.96 SD: {loa_low:.3f}')
+    fig.add_hline(y=loa_high, line_dash='dash', line_color='gray', annotation_text=f'LoA +1.96 SD: {loa_high:.3f}')
+    fig.update_layout(
+        title=title,
+        xaxis_title=f'Mean of ({label_a} and {label_b})',
+        yaxis_title=f'Difference ({label_a} − {label_b})',
+        height=400
+    )
+    return fig
+
+
 def create_metrics_display(metrics: Dict[str, float]) -> str:
     """Create formatted metrics display."""
     return f"""

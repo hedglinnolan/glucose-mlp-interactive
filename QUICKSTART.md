@@ -2,41 +2,36 @@
 
 ## Prerequisites
 
-- Python 3.8 or higher
+- **Python 3.8 or 3.9** (3.10+ not supported: `llvmlite`/`numba`/`shap` require &lt;3.10)
+- **uv** (recommended): [Install uv](https://docs.astral.sh/uv/getting-started/installation/)
 - Git (for cloning)
 - 4GB RAM minimum
+- **Optional:** Install and run [Ollama](https://ollama.ai) if you want LLM-powered interpretations.
 
 ## Windows (PowerShell)
 
 ### From Fresh Clone
 
 ```powershell
-# 1. Clone the repository (if not already cloned)
+# 1. Install uv (one-time): irm https://astral.sh/uv/install.ps1 | iex
+
+# 2. Clone the repository (if not already cloned)
 # git clone <repo-url>
 # cd glucose-mlp-interactive
 
-# 2. Create virtual environment
-python -m venv .venv
+# 3. First time setup (creates .venv, installs deps via uv)
+.\setup.ps1
 
-# 3. Activate virtual environment
-.\.venv\Scripts\Activate.ps1
+# 4. Run preflight check (optional but recommended)
+uv run python preflight.py
 
-# 4. Install dependencies
-pip install -r requirements.txt
-
-# 5. Run preflight check (optional but recommended)
-python preflight.py
-
-# 6. Run the app
+# 5. Run the app
 .\run.ps1
 ```
 
-**Or use the automated script:**
+**Or minimal:**
 ```powershell
-# First time setup
 .\setup.ps1
-
-# Then run
 .\run.ps1
 ```
 
@@ -45,35 +40,29 @@ python preflight.py
 ### From Fresh Clone
 
 ```bash
-# 1. Clone the repository (if not already cloned)
+# 1. Install uv (one-time): curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Clone the repository (if not already cloned)
 # git clone <repo-url>
 # cd glucose-mlp-interactive
 
-# 2. Create virtual environment
-python3 -m venv .venv
+# 3. Make scripts executable (first time)
+chmod +x setup.sh run.sh
 
-# 3. Activate virtual environment
-source .venv/bin/activate
-
-# 4. Install dependencies
-pip install -r requirements.txt
+# 4. First time setup (creates .venv, installs deps via uv)
+./setup.sh
 
 # 5. Run preflight check (optional but recommended)
-python3 preflight.py
+uv run python preflight.py
 
 # 6. Run the app
 ./run.sh
 ```
 
-**Or use the automated script:**
+**Or minimal:**
 ```bash
-# Make scripts executable (first time)
 chmod +x setup.sh run.sh
-
-# First time setup
 ./setup.sh
-
-# Then run
 ./run.sh
 ```
 
@@ -105,47 +94,55 @@ This checks:
 
 ## Common Errors & Fixes
 
-### Error: "streamlit: command not found"
-**Fix:** Make sure virtual environment is activated
-```powershell
-# Windows
-.\.venv\Scripts\Activate.ps1
-streamlit run app.py
-```
+### Error: "uv not found"
+**Fix:** Install uv first — see [uv installation](https://docs.astral.sh/uv/getting-started/installation/).
 
+### Error: "streamlit: command not found"
+**Fix:** Run via uv (uses .venv automatically)
 ```bash
-# macOS/Linux
-source .venv/bin/activate
-streamlit run app.py
+uv run streamlit run app.py
 ```
 
 ### Error: "No module named 'torch'"
-**Fix:** Install PyTorch
+**Fix:** Reinstall dependencies
 ```bash
-pip install torch
-# Or reinstall all requirements
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ### Error: "No module named 'sklearn'"
-**Fix:** Install scikit-learn
+**Fix:** Reinstall dependencies
 ```bash
-pip install scikit-learn
-# Or reinstall all requirements
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ### Error: "numpy version incompatible"
 **Fix:** Upgrade numpy
 ```bash
-pip install --upgrade numpy>=1.24.0
+uv pip install --upgrade "numpy>=1.24.0"
 ```
 
 ### Error: "shap not found" (when using SHAP features)
 **Fix:** Install SHAP (optional)
 ```bash
-pip install shap
+uv pip install shap
 ```
+
+### LLM / Ollama interpretations not working
+**Symptom:** "Interpret these results using an LLM" shows setup instructions or an error.  
+**Fix:**
+1. Install [Ollama](https://ollama.ai).
+2. Run `ollama serve` in a terminal (and keep it running).
+3. Pull a model, e.g. `ollama run qwen2.5:7b`.  
+The app works fully without Ollama; this only affects the optional LLM feature. See [README → Troubleshooting](README.md#-troubleshooting) for more detail.
+
+### Error: `uv pip install` fails — "llvmlite" / "only versions >=3.6,<3.10 are supported"
+**Cause:** The venv uses Python 3.10+; `llvmlite` (numba/shap) supports only &lt;3.10.  
+**Fix:** Use Python 3.9. Remove `.venv` and re-run setup:
+```bash
+rm -rf .venv && ./setup.sh   # macOS/Linux
+# Windows: Remove-Item -Recurse -Force .venv; .\setup.ps1
+```
+Setup creates `.venv` with `uv venv --python 3.9` and installs deps.
 
 ### Error: "Port 8501 already in use"
 **Fix:** Use a different port
