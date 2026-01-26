@@ -11,7 +11,7 @@ from sklearn.preprocessing import StandardScaler, RobustScaler, OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer
 from ml.feature_steps import create_pca_step, KMeansFeatures
-from ml.preprocess_operators import UnitHarmonizer, PlausibilityGate, OutlierCapping
+from ml.preprocess_operators import UnitHarmonizer, PlausibilityGate, OutlierCapping, plausibility_row_mask
 from ml.clinical_units import infer_unit, CLINICAL_VARIABLES
 from ml.physiology_reference import load_reference_bundle, match_variable_key, get_reference_interval
 
@@ -91,6 +91,24 @@ def build_plausibility_bounds(
     }
 
 
+def apply_plausibility_filter(
+    df: pd.DataFrame,
+    numeric_features: List[str],
+    plausibility_bounds: Dict[str, Any],
+    unit_conversion_factors: Optional[List[float]] = None,
+) -> pd.DataFrame:
+    """Filter rows to those where all plausibility-gated numeric cols are within NHANES range."""
+    lb = plausibility_bounds.get("lower_bounds", [])
+    ub = plausibility_bounds.get("upper_bounds", [])
+    if not lb and not ub:
+        return df
+    X = df[numeric_features].values.astype(float)
+    if unit_conversion_factors:
+        X = X * np.array(unit_conversion_factors, dtype=float)
+    mask = plausibility_row_mask(X, lb, ub)
+    return df.loc[mask].reset_index(drop=True)
+
+
 def build_preprocessing_pipeline(
     numeric_features: List[str],
     categorical_features: List[str],
@@ -102,6 +120,7 @@ def build_preprocessing_pipeline(
     numeric_outlier_params: Optional[Dict[str, Any]] = None,
     unit_harmonization_factors: Optional[List[float]] = None,
     plausibility_bounds: Optional[Dict[str, Any]] = None,
+    plausibility_mode: str = 'clip',  # 'clip' = set out-of-range to NaN; 'filter' = drop rows
     categorical_imputation: str = 'most_frequent',  # 'most_frequent', 'constant'
     categorical_encoding: str = 'onehot',  # 'onehot', 'target' (if enabled)
     handle_unknown: str = 'ignore',  # For one-hot encoding
@@ -141,8 +160,8 @@ def build_preprocessing_pipeline(
         if unit_harmonization_factors:
             numeric_steps.append(('unit_harmonize', UnitHarmonizer(unit_harmonization_factors)))
 
-        # Plausibility gating (set out-of-range to NaN)
-        if plausibility_bounds:
+        # Plausibility gating (clip: set out-of-range to NaN; filter: rows dropped before pipeline)
+        if plausibility_bounds and plausibility_mode != 'filter':
             numeric_steps.append((
                 'plausibility_gate',
                 PlausibilityGate(
@@ -242,18 +261,20 @@ def build_preprocessing_pipeline(
     return Pipeline(steps)
 
 
-def get_pipeline_recipe(pipeline: Pipeline) -> str:
+def get_pipeline_recipe(pipeline: Pipeline, plausibility_mode: Optional[str] = None) -> str:
     """
     Get human-readable description of pipeline steps.
     
     Args:
         pipeline: sklearn Pipeline
+        plausibility_mode: If 'filter', note that rows were filtered to NHANES range before pipeline.
         
     Returns:
         String description of pipeline
     """
     steps = []
-    
+    if plausibility_mode == "filter":
+        steps.append("Plausibility: rows filtered to NHANES range (before pipeline).")
     if hasattr(pipeline.named_steps['preprocessor'], 'transformers_'):
         for name, transformer, columns in pipeline.named_steps['preprocessor'].transformers_:
             if name == 'numeric':

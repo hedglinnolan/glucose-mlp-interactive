@@ -18,9 +18,25 @@ def load_and_preview_csv(file_path: str, n_rows: int = 5) -> pd.DataFrame:
 
 
 def get_numeric_columns(df: pd.DataFrame) -> List[str]:
-    """Get list of numeric column names."""
+    """Get list of numeric column names (at least one non-null)."""
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     return [col for col in numeric_cols if df[col].notna().sum() > 0]
+
+
+def get_categorical_columns(df: pd.DataFrame) -> List[str]:
+    """Get list of categorical column names (object, category, bool; at least one non-null)."""
+    cand = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+    return [col for col in cand if df[col].notna().sum() > 0]
+
+
+def get_selectable_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
+    """
+    Return (numeric_cols, categorical_cols) for target/feature selection.
+    Use numeric + categorical for the full selectable pool.
+    """
+    numeric = get_numeric_columns(df)
+    categorical = get_categorical_columns(df)
+    return numeric, categorical
 
 
 def prepare_data(
@@ -94,32 +110,38 @@ def prepare_data(
 def validate_data_selection(
     df: pd.DataFrame,
     target_col: str,
-    feature_cols: List[str]
+    feature_cols: List[str],
+    task_type: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    """Validate that data selection is valid."""
+    """Validate that data selection is valid. Target/features must be in selectable pool (numeric + categorical)."""
     if not target_col:
         return False, "Please select a target column"
-    
+
     if not feature_cols:
         return False, "Please select at least one feature column"
-    
+
     if target_col in feature_cols:
         return False, "Target column cannot be in feature columns"
-    
+
     if target_col not in df.columns:
         return False, f"Target column '{target_col}' not found in data"
-    
+
     missing = set(feature_cols) - set(df.columns)
     if missing:
         return False, f"Feature columns not found: {missing}"
-    
-    # Check for numeric data
-    if target_col not in get_numeric_columns(df):
-        return False, f"Target column '{target_col}' must be numeric"
-    
-    numeric_features = get_numeric_columns(df)
-    non_numeric = set(feature_cols) - set(numeric_features)
-    if non_numeric:
-        return False, f"Non-numeric feature columns: {non_numeric}"
-    
+
+    numeric_cols, categorical_cols = get_selectable_columns(df)
+    selectable = set(numeric_cols) | set(categorical_cols)
+
+    if target_col not in selectable:
+        return False, f"Target column '{target_col}' must be numeric or categorical (selectable)"
+
+    invalid_features = set(feature_cols) - selectable
+    if invalid_features:
+        return False, f"Feature columns must be numeric or categorical: {invalid_features}"
+
+    target_is_categorical = target_col in categorical_cols
+    if target_is_categorical and task_type == "regression":
+        return False, "Categorical target is only supported for classification; use a numeric target for regression."
+
     return True, "OK"

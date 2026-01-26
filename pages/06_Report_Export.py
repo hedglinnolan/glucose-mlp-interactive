@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 init_session_state()
 
-st.set_page_config(page_title="Report Export", page_icon="📄", layout="wide")
-st.title("📄 Report Export")
+st.set_page_config(page_title="Report Export", page_icon=None, layout="wide")
+st.title("Report Export")
 
 # Progress indicator
 render_progress_indicator("06_Report_Export")
@@ -35,7 +35,7 @@ render_progress_indicator("06_Report_Export")
 # Check prerequisites
 df = get_data()
 if df is None:
-    st.warning("⚠️ Please complete the modeling workflow first")
+    st.warning("Please complete the modeling workflow first")
     st.stop()
 
 data_config: DataConfig = st.session_state.get('data_config')
@@ -49,7 +49,7 @@ profile = st.session_state.get('dataset_profile')
 coach_output = st.session_state.get('coach_output')
 
 if not trained_models:
-    st.warning("⚠️ Please train models first")
+    st.warning("Please train models first")
     st.stop()
 
 # Custom CSS for better report aesthetics
@@ -197,7 +197,7 @@ def generate_report() -> str:
     git_info = get_git_info()
     
     # Header with metadata
-    report_lines.append("# 📊 Modeling Lab Report")
+    report_lines.append("# Modeling Lab Report")
     report_lines.append("")
     report_lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     report_lines.append(f"**Git Commit:** {git_info['commit']} ({git_info['branch']})")
@@ -207,7 +207,7 @@ def generate_report() -> str:
     report_lines.append("")
     
     # Executive Summary
-    report_lines.append("## 🎯 Executive Summary")
+    report_lines.append("## Executive Summary")
     report_lines.append("")
     
     # Best model summary
@@ -229,14 +229,14 @@ def generate_report() -> str:
     if profile and profile.warnings:
         report_lines.append("**Key Data Warnings:**")
         for w in profile.warnings[:3]:
-            report_lines.append(f"- ⚠️ {w.short_message}")
+            report_lines.append(f"- {w.short_message}")
         report_lines.append("")
     
     report_lines.append("---")
     report_lines.append("")
     
     # Dataset Summary
-    report_lines.append("## 📁 Dataset Summary")
+    report_lines.append("## Dataset Summary")
     report_lines.append("")
     report_lines.append("| Property | Value |")
     report_lines.append("|----------|-------|")
@@ -282,7 +282,7 @@ def generate_report() -> str:
     eda_insights = [i for i in insights if i.get("category") != "preprocessing"]
     prep_insights = [i for i in insights if i.get("category") == "preprocessing"]
     if eda_insights or prep_insights:
-        report_lines.append("## 💡 Key insights after pre-processing")
+        report_lines.append("## Key insights after pre-processing")
         report_lines.append("")
         if eda_insights:
             report_lines.append("### From EDA")
@@ -324,7 +324,7 @@ def generate_report() -> str:
     pipelines_by_model = st.session_state.get("preprocessing_pipelines_by_model") or {}
     configs_by_model = st.session_state.get("preprocessing_config_by_model") or {}
     if pipelines_by_model:
-        report_lines.append("## ⚙️ Preprocessing (per model)")
+        report_lines.append("## Preprocessing (per model)")
         report_lines.append("")
         for mk, pl in pipelines_by_model.items():
             report_lines.append(f"### {mk.upper()}")
@@ -344,7 +344,7 @@ def generate_report() -> str:
         report_lines.append("---")
         report_lines.append("")
     elif pipeline:
-        report_lines.append("## ⚙️ Preprocessing Pipeline")
+        report_lines.append("## Preprocessing Pipeline")
         report_lines.append("")
         recipe = get_pipeline_recipe(pipeline)
         report_lines.append("```")
@@ -355,7 +355,7 @@ def generate_report() -> str:
         report_lines.append("")
     
     # Model Performance Comparison
-    report_lines.append("## 📈 Model Performance")
+    report_lines.append("## Model Performance")
     report_lines.append("")
     
     # Metrics table
@@ -394,12 +394,35 @@ def generate_report() -> str:
                 cv = results['cv_results']
                 report_lines.append(f"| {name.upper()} | {cv['mean']:.4f} | ±{cv['std']:.4f} |")
         report_lines.append("")
-    
+
+        from ml.eval import compare_models_paired_cv
+        cv_names = [n for n, r in model_results.items() if r.get("cv_results")]
+        paired = compare_models_paired_cv(
+            cv_names,
+            model_results,
+            task_type=data_config.task_type if data_config else "regression",
+        )
+        if paired:
+            report_lines.append("### Statistical comparison of models (CV)")
+            report_lines.append("")
+            report_lines.append("Pairwise paired tests on fold-level CV scores. Mean Δ = mean(A) − mean(B); p < 0.05 suggests a significant difference.")
+            report_lines.append("")
+            report_lines.append("| Model A | Model B | Mean Δ | Test | p | Significant |")
+            report_lines.append("|---------|---------|--------|------|---|-------------|")
+            for (ma, mb), v in paired.items():
+                mean_d = v["mean_delta"]
+                tname = v["test_name"]
+                p = v["p"]
+                sig = "Yes" if (p is not None and np.isfinite(p) and p < 0.05) else "No"
+                p_str = f"{p:.4f}" if (p is not None and np.isfinite(p)) else "—"
+                report_lines.append(f"| {ma.upper()} | {mb.upper()} | {mean_d:.4f} | {tname} | {p_str} | {sig} |")
+            report_lines.append("")
+
     report_lines.append("---")
     report_lines.append("")
     
     # Model-Specific Details
-    report_lines.append("## 🔬 Model-Specific Details")
+    report_lines.append("## Model-Specific Details")
     report_lines.append("")
     
     registry = get_registry()
@@ -488,7 +511,7 @@ def generate_report() -> str:
     # Feature Importance
     perm_importance = st.session_state.get('permutation_importance', {})
     if perm_importance:
-        report_lines.append("## 📊 Feature Importance (Permutation)")
+        report_lines.append("## Feature Importance (Permutation)")
         report_lines.append("")
         for name, perm_data in perm_importance.items():
             report_lines.append(f"### {name.upper()}")
@@ -511,7 +534,7 @@ def generate_report() -> str:
     rob = st.session_state.get("explainability_robustness") or {}
 
     if pd_data and any(pd_data.values()):
-        report_lines.append("## 📈 Partial Dependence")
+        report_lines.append("## Partial Dependence")
         report_lines.append("")
         for name, data in pd_data.items():
             if not data:
@@ -523,7 +546,7 @@ def generate_report() -> str:
         report_lines.append("")
 
     if shap_data:
-        report_lines.append("## 🔬 SHAP")
+        report_lines.append("## SHAP")
         report_lines.append("")
         report_lines.append(f"Models: {', '.join(m.upper() for m in shap_data.keys())}.")
         for name, s in shap_data.items():
@@ -535,7 +558,7 @@ def generate_report() -> str:
         report_lines.append("")
 
     if rob:
-        report_lines.append("## 🔄 Cross-Model Robustness")
+        report_lines.append("## Cross-Model Robustness")
         report_lines.append("")
         report_lines.append("| Model A | Model B | Spearman ρ | Top-5 overlap |")
         report_lines.append("|---------|---------|------------|---------------|")
@@ -587,7 +610,7 @@ def generate_report() -> str:
             if isinstance(k, str) and k.startswith("llm_result_") and v not in ("__unavailable__", "__error__")
         ]
         if llm_items:
-            report_lines.append("## 🤖 LLM-backed interpretations")
+            report_lines.append("## LLM-backed interpretations")
             report_lines.append("")
             for k, v in llm_items[:20]:
                 label = k.replace("llm_result_", "").replace("_", " ").title()
@@ -599,7 +622,7 @@ def generate_report() -> str:
 
     # Recommendations
     if coach_output:
-        report_lines.append("## 💡 Model Selection Coach Insights")
+        report_lines.append("## Model Selection Coach Insights")
         report_lines.append("")
         report_lines.append(f"> {coach_output.data_sufficiency_narrative}")
         report_lines.append("")
@@ -607,7 +630,7 @@ def generate_report() -> str:
         if coach_output.warnings_summary:
             report_lines.append("**Warnings:**")
             for warning in coach_output.warnings_summary[:3]:
-                report_lines.append(f"- ⚠️ {warning}")
+                report_lines.append(f"- {warning}")
             report_lines.append("")
         
         report_lines.append("---")
@@ -631,7 +654,7 @@ def generate_report() -> str:
 # ============================================================================
 # REPORT PREVIEW
 # ============================================================================
-st.header("📋 Report Preview")
+st.header("Report Preview")
 
 # Generate report
 report_text = generate_report()
@@ -646,7 +669,7 @@ with st.container():
 st.header("💾 Export Options")
 
 # Export configuration
-with st.expander("⚙️ Export Configuration"):
+with st.expander("Export Configuration"):
     export_models = st.checkbox("Include trained model artifacts (joblib/pickle)", value=True)
     export_predictions = st.checkbox("Include predictions CSV", value=True)
     export_plots = st.checkbox("Include plots (requires kaleido)", value=False)
@@ -694,7 +717,7 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     st.download_button(
-        label="📄 Download Report (Markdown)",
+        label="Download Report (Markdown)",
         data=report_text,
         file_name=f"modeling_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
         mime="text/markdown",
@@ -711,7 +734,7 @@ with col2:
     comparison_df = pd.DataFrame(comparison_data)
     
     st.download_button(
-        label="📊 Download Metrics (CSV)",
+        label="Download Metrics (CSV)",
         data=comparison_df.to_csv(index=False),
         file_name=f"model_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
@@ -809,18 +832,18 @@ with col3:
         zip_file.writestr("manifest.json", json.dumps(manifest, indent=2, default=str))
     
     st.download_button(
-        label="📦 Download Complete Package (ZIP)",
+        label="Download Complete Package (ZIP)",
         data=zip_buffer.getvalue(),
         file_name=f"modeling_package_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
         mime="application/zip"
     )
 
-st.success("✅ Report generated successfully!")
+st.success("Report generated successfully!")
 
 # ============================================================================
 # STATE DEBUG
 # ============================================================================
-with st.expander("🔧 Advanced / State Debug", expanded=False):
+with st.expander("Advanced / State Debug", expanded=False):
     st.markdown("**Current State:**")
     st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
     st.write(f"• Target: {data_config.target_col if data_config else 'None'}")

@@ -5,6 +5,7 @@ Train models, evaluate, compare metrics, show diagnostics.
 import streamlit as st
 import pandas as pd
 import numpy as np
+import time
 from typing import Dict, List, Optional, Any
 import logging
 
@@ -79,15 +80,15 @@ init_session_state()
 # Set global seed
 set_global_seed(st.session_state.get('random_seed', 42))
 
-st.set_page_config(page_title="Train & Compare", page_icon="🏋️", layout="wide")
-st.title("🏋️ Train & Compare Models")
+st.set_page_config(page_title="Train & Compare", page_icon=None, layout="wide")
+st.title("Train & Compare Models")
 
 # Progress indicator
 render_progress_indicator("04_Train_and_Compare")
 
 # Global random seed control
 with st.sidebar:
-    st.header("⚙️ Global Settings")
+    st.header("Global Settings")
     random_seed = st.number_input(
         "Random Seed",
         min_value=0,
@@ -103,18 +104,18 @@ with st.sidebar:
 # Check prerequisites
 df = get_data()
 if df is None:
-    st.warning("⚠️ Please upload data first")
+    st.warning("Please upload data first")
     st.stop()
 
 data_config: DataConfig = st.session_state.get('data_config')
 if data_config is None or not data_config.target_col:
-    st.warning("⚠️ Please configure target and features")
+    st.warning("Please configure target and features")
     st.stop()
 
 pipelines_by_model = st.session_state.get('preprocessing_pipelines_by_model', {})
 pipeline = get_preprocessing_pipeline()
 if pipeline is None and not pipelines_by_model:
-    st.warning("⚠️ Please build preprocessing pipeline first")
+    st.warning("Please build preprocessing pipeline first")
     st.stop()
 
 # Get final detection values
@@ -130,20 +131,20 @@ if task_type_final:
     data_config.task_type = task_type_final
 
 # Split configuration
-st.header("📊 Data Splitting")
+st.header("Data Splitting")
 
 # Longitudinal data handling
 use_group_split = False
 if cohort_type_final == 'longitudinal' and entity_id_final:
-    st.info(f"ℹ️ Longitudinal data detected. Entity ID: `{entity_id_final}`. Using group-based splitting to prevent data leakage.")
+    st.info(f"Longitudinal data detected. Entity ID: `{entity_id_final}`. Using group-based splitting to prevent data leakage.")
     use_group_split = True
     if entity_id_final not in df.columns:
-        st.error(f"⚠️ Entity ID column '{entity_id_final}' not found in data. Please check Upload & Audit page.")
+        st.error(f"Entity ID column '{entity_id_final}' not found in data. Please check Upload & Audit page.")
         st.stop()
 elif cohort_type_final == 'longitudinal' and not entity_id_final:
-    st.warning("⚠️ Longitudinal data detected but no entity ID column found. Consider selecting an entity ID in Upload & Audit page.")
+    st.warning("Longitudinal data detected but no entity ID column found. Consider selecting an entity ID in Upload & Audit page.")
     if data_config.datetime_col:
-        st.info("ℹ️ Using time-based split as fallback for longitudinal data.")
+        st.info("Using time-based split as fallback for longitudinal data.")
 
 # Time-series split option
 use_time_split = False
@@ -159,7 +160,7 @@ if data_config.datetime_col:
         help="Split data chronologically instead of randomly (recommended for time-series)"
     )
     if not use_time_split and not use_group_split:
-        st.warning("⚠️ Datetime column detected but random split selected. Consider using time-based split for time-series data.")
+        st.warning("Datetime column detected but random split selected. Consider using time-based split for time-series data.")
 
 col1, col2, col3 = st.columns(3)
 
@@ -177,7 +178,7 @@ with col3:
     test_size = st.slider("Test %", 5, 30, test_size_default, key="train_split_test_pct") / 100
 
 if abs(train_size + val_size + test_size - 1.0) > 0.01:
-    st.error("⚠️ Splits must sum to 100%")
+    st.error("Splits must sum to 100%")
     st.stop()
 
 split_config = SplitConfig(
@@ -203,64 +204,79 @@ else:
     st.session_state.use_cv = False
 
 # Prepare data splits
-if st.button("🔄 Prepare Splits", type="primary"):
+if st.button("Prepare Splits", type="primary"):
     try:
-        # Lazy import sklearn splitting functions
+        t0 = time.perf_counter()
         train_test_split, GroupShuffleSplit, GroupKFold = _get_sklearn_splits()
-        
-        X = df[data_config.feature_cols]
-        y = df[data_config.target_col]
-        indices = np.arange(len(df))
+        from sklearn.preprocessing import LabelEncoder
+
+        X = df[data_config.feature_cols].copy()
+        y = df[data_config.target_col].copy()
+        mask = y.notna()
+        X = X[mask].reset_index(drop=True)
+        y = y[mask].reset_index(drop=True)
+        original_indices = np.where(mask)[0]
+        indices = np.arange(len(X))
+
+        target_is_categorical = y.dtype.name in ("object", "category", "bool") or (
+            hasattr(y.dtype, "kind") and y.dtype.kind in ("O", "b")
+        )
+        le = None
+        if target_is_categorical:
+            le = LabelEncoder()
+            y = pd.Series(le.fit_transform(y.astype(str)), index=y.index)
+            st.session_state["target_label_encoder"] = le
+        else:
+            st.session_state.pop("target_label_encoder", None)
         
         # Split data (group-based, time-based, or random)
         if use_group_split and entity_id_final:
-            # Group-based split for longitudinal data
-            groups = to_numpy_1d(df[entity_id_final])
+            groups = to_numpy_1d(df.iloc[original_indices][entity_id_final])
             y_arr = to_numpy_1d(y)
-            
+
             gss = GroupShuffleSplit(n_splits=1, test_size=(val_size + test_size), random_state=split_config.random_state)
             train_idx, temp_idx = next(gss.split(indices, y_arr, groups))
-            
-            # Split temp into val and test, maintaining groups
+
             groups_temp = groups[temp_idx]
             rel_val = val_size / (val_size + test_size)
             gss2 = GroupShuffleSplit(n_splits=1, test_size=(1 - rel_val), random_state=split_config.random_state)
             val_idx, test_idx = next(gss2.split(indices[temp_idx], y_arr[temp_idx], groups_temp))
-            
+
             X_train = X.iloc[train_idx]
             X_val = X.iloc[temp_idx[val_idx]]
             X_test = X.iloc[temp_idx[test_idx]]
             y_train = y_arr[train_idx]
             y_val = y_arr[temp_idx[val_idx]]
             y_test = y_arr[temp_idx[test_idx]]
-            
+
             n_train_groups = len(np.unique(groups[train_idx]))
             n_val_groups = len(np.unique(groups[temp_idx[val_idx]]))
             n_test_groups = len(np.unique(groups[temp_idx[test_idx]]))
-            st.info(f"👥 Group-based split: {n_train_groups} train groups, {n_val_groups} val groups, {n_test_groups} test groups")
+            st.info(f"Group-based split: {n_train_groups} train groups, {n_val_groups} val groups, {n_test_groups} test groups")
         elif split_config.use_time_split and data_config.datetime_col:
-            # Time-based split
-            df_with_datetime = df.copy()
-            df_with_datetime['_temp_index'] = df_with_datetime.index
-            df_with_datetime = df_with_datetime.sort_values(data_config.datetime_col)
-            
-            # Calculate split indices
-            n_total = len(df_with_datetime)
+            df_work = df.iloc[original_indices].copy()
+            df_work["_temp_index"] = np.arange(len(df_work))
+            df_work = df_work.sort_values(data_config.datetime_col)
+
+            n_total = len(df_work)
             n_train = int(n_total * train_size)
             n_val = int(n_total * val_size)
-            
-            train_indices = df_with_datetime.iloc[:n_train]['_temp_index'].values
-            val_indices = df_with_datetime.iloc[n_train:n_train+n_val]['_temp_index'].values
-            test_indices = df_with_datetime.iloc[n_train+n_val:]['_temp_index'].values
-            
-            X_train = X.iloc[train_indices]
-            X_val = X.iloc[val_indices]
-            X_test = X.iloc[test_indices]
-            y_train = to_numpy_1d(y.iloc[train_indices])
-            y_val = to_numpy_1d(y.iloc[val_indices])
-            y_test = to_numpy_1d(y.iloc[test_indices])
-            
-            st.info(f"⏰ Time-based split: Train={df_with_datetime.iloc[0][data_config.datetime_col]} to {df_with_datetime.iloc[n_train-1][data_config.datetime_col]}")
+
+            train_pos = df_work.iloc[:n_train]["_temp_index"].values
+            val_pos = df_work.iloc[n_train : n_train + n_val]["_temp_index"].values
+            test_pos = df_work.iloc[n_train + n_val :]["_temp_index"].values
+
+            X_train = X.iloc[train_pos]
+            X_val = X.iloc[val_pos]
+            X_test = X.iloc[test_pos]
+            y_train = to_numpy_1d(y.iloc[train_pos])
+            y_val = to_numpy_1d(y.iloc[val_pos])
+            y_test = to_numpy_1d(y.iloc[test_pos])
+            train_indices = original_indices[train_pos]
+            val_indices = original_indices[val_pos]
+            test_indices = original_indices[test_pos]
+
+            st.info(f"Time-based split: Train={df_work.iloc[0][data_config.datetime_col]} to {df_work.iloc[n_train - 1][data_config.datetime_col]}")
         elif split_config.stratify and task_type_final == 'classification':
             idx_train, idx_temp, y_train, y_temp = train_test_split(
                 indices, y, test_size=(val_size + test_size),
@@ -290,21 +306,23 @@ if st.button("🔄 Prepare Splits", type="primary"):
         
         feature_names = list(data_config.feature_cols)
         set_splits(X_train, X_val, X_test, to_numpy_1d(y_train), to_numpy_1d(y_val), to_numpy_1d(y_test), feature_names)
+        elapsed = time.perf_counter() - t0
+        st.session_state.setdefault("last_timings", {})["Prepare Splits"] = round(elapsed, 2)
         
-        # Store indices for explainability (need raw data)
+        # Store indices for explainability (original df positions)
         if use_group_split and entity_id_final:
-            st.session_state.train_indices = train_idx.tolist() if hasattr(train_idx, 'tolist') else list(train_idx)
-            st.session_state.test_indices = (temp_idx[test_idx].tolist() if hasattr(temp_idx[test_idx], 'tolist') else list(temp_idx[test_idx]))
+            st.session_state.train_indices = original_indices[train_idx].tolist()
+            st.session_state.test_indices = original_indices[temp_idx[test_idx]].tolist()
         elif split_config.use_time_split and data_config.datetime_col:
-            st.session_state.train_indices = train_indices.tolist() if hasattr(train_indices, 'tolist') else list(train_indices)
-            st.session_state.test_indices = test_indices.tolist() if hasattr(test_indices, 'tolist') else list(test_indices)
+            st.session_state.train_indices = train_indices.tolist()
+            st.session_state.test_indices = test_indices.tolist()
         else:
-            st.session_state.train_indices = idx_train.tolist() if hasattr(idx_train, 'tolist') else list(idx_train)
-            st.session_state.test_indices = idx_test.tolist() if hasattr(idx_test, 'tolist') else list(idx_test)
+            st.session_state.train_indices = original_indices[idx_train].tolist()
+            st.session_state.test_indices = original_indices[idx_test].tolist()
         
-        st.success(f"✅ Splits prepared: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
+        st.success(f"Splits prepared: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
     except Exception as e:
-        st.error(f"❌ Error preparing splits: {str(e)}")
+        st.error(f"Error preparing splits: {e}")
         logger.exception(e)
 
 # Check if splits are ready
@@ -343,7 +361,7 @@ insights = get_insights_by_category()
 eda_only = [i for i in insights if i.get('category') != 'preprocessing']
 prep_only = [i for i in insights if i.get('category') == 'preprocessing']
 if eda_only or prep_only:
-    with st.expander("💡 Key insights after pre-processing", expanded=True):
+    with st.expander("Key insights after pre-processing", expanded=True):
         if eda_only:
             st.markdown("**From EDA**")
             for insight in eda_only:
@@ -364,7 +382,7 @@ coach_recs = _compute_coach_recommendations(
 )
 
 if coach_recs:
-    with st.expander("🎓 Model Selection Coach", expanded=True):
+    with st.expander("Model Selection Coach", expanded=True):
         st.caption("Selections here sync with Preprocessing; pick models there first to build pipelines.")
         st.markdown("**Based on your data, try these first:**")
         for idx, rec in enumerate(coach_recs[:3]):
@@ -384,11 +402,11 @@ if coach_recs:
             if st.button(f"Select {display_name}", key=button_key):
                 for model_key in rec.recommended_models:
                     st.session_state[f'train_model_{model_key}'] = True
-                st.success(f"✅ Selected {len(rec.recommended_models)} {display_name}")
+                st.success(f"Selected {len(rec.recommended_models)} {display_name}")
                 st.rerun()
 
 # Model selection and configuration
-st.header("🤖 Model Configuration")
+st.header("Model Configuration")
 _prep_pipes = st.session_state.get("preprocessing_pipelines_by_model") or {}
 _prep_models = [k for k in _prep_pipes.keys() if k != "default"]
 if _prep_models:
@@ -472,14 +490,14 @@ if coach_output and hasattr(coach_output, 'recommended_models') and coach_output
     if model_view == "Coach Recommendations":
         # Tab-based view of buckets
         tab_rec, tab_try, tab_not = st.tabs([
-            f"✅ Recommended ({len(coach_output.recommended_models)})",
-            f"🔄 Worth Trying ({len(coach_output.worth_trying_models)})",
-            f"⛔ Not Recommended ({len(coach_output.not_recommended_models)})"
+            f"Recommended ({len(coach_output.recommended_models)})",
+            f"Worth Trying ({len(coach_output.worth_trying_models)})",
+            f"Not Recommended ({len(coach_output.not_recommended_models)})"
         ])
         
         # Recommended Tab
         with tab_rec:
-            st.markdown('<div class="bucket-header bucket-recommended">✅ Recommended Models</div>', 
+            st.markdown('<div class="bucket-header bucket-recommended">Recommended Models</div>', 
                        unsafe_allow_html=True)
             st.caption("These models are well-suited to your dataset.")
             if st.button("Select all recommended", key="coach_select_all_recommended"):
@@ -515,7 +533,7 @@ if coach_output and hasattr(coach_output, 'recommended_models') and coach_output
                     
                     # Show hyperparameters
                     if spec.hyperparam_schema:
-                        with st.expander(f"⚙️ {rec.model_name} Settings"):
+                        with st.expander(f"{rec.model_name} Settings"):
                             st.markdown(f"*{rec.rationale}*")
                             params = {}
                             for param_name, param_def in spec.hyperparam_schema.items():
@@ -553,7 +571,7 @@ if coach_output and hasattr(coach_output, 'recommended_models') and coach_output
         
         # Worth Trying Tab
         with tab_try:
-            st.markdown('<div class="bucket-header bucket-worth-trying">🔄 Worth Trying</div>', 
+            st.markdown('<div class="bucket-header bucket-worth-trying">Worth Trying</div>', 
                        unsafe_allow_html=True)
             st.caption("These models may work but have some caveats.")
             if st.button("Select all worth trying", key="coach_select_all_worth_trying"):
@@ -616,7 +634,7 @@ if coach_output and hasattr(coach_output, 'recommended_models') and coach_output
         
         # Not Recommended Tab
         with tab_not:
-            st.markdown('<div class="bucket-header bucket-not-recommended">⛔ Not Recommended</div>', 
+            st.markdown('<div class="bucket-header bucket-not-recommended">Not Recommended</div>', 
                        unsafe_allow_html=True)
             st.caption("These models are not well-suited for your current dataset. Use with caution.")
             
@@ -630,7 +648,7 @@ if coach_output and hasattr(coach_output, 'recommended_models') and coach_output
                     st.error(f"**Reason:** {rec.rationale}")
                     if rec.risks:
                         for risk in rec.risks[:3]:
-                            st.markdown(f"• ⚠️ {risk}")
+                            st.markdown(f"• {risk}")
                     
                     st.markdown(f"**When this model IS appropriate:** {rec.when_to_use}")
                     
@@ -643,7 +661,7 @@ if coach_output and hasattr(coach_output, 'recommended_models') and coach_output
                     
                     if is_selected:
                         models_to_train.append(rec.model_key)
-                        st.warning("⚠️ You've selected a model that may not perform well on your data.")
+                        st.warning("You've selected a model that may not perform well on your data.")
     else:
         # Fall through to family-based view
         pass
@@ -680,7 +698,7 @@ if model_view == "Model Family" or not coach_output:
         )
     else:
         show_advanced = False
-        st.caption("ℹ️ No advanced models available for this task type.")
+        st.caption("No advanced models available for this task type.")
 
     # Display models by group
     for group_name in sorted(model_groups.keys()):
@@ -707,14 +725,16 @@ if model_view == "Model Family" or not coach_output:
                 if spec.hyperparam_schema:
                     with st.expander(f"{spec.name} Hyperparameters"):
                         params = {}
+                        automl_best = st.session_state.get("nn_automl_best_params", {}) if model_key == "nn" else {}
                         for param_name, param_def in spec.hyperparam_schema.items():
                             param_key = f"{model_key}_{param_name}"
+                            default_val = automl_best.get(param_name, param_def['default'])
                             if param_def['type'] == 'int':
                                 params[param_name] = st.number_input(
                                     param_def.get('help', param_name),
                                     min_value=param_def['min'],
                                     max_value=param_def['max'],
-                                    value=param_def['default'],
+                                    value=default_val,
                                     key=param_key
                                 )
                             elif param_def['type'] == 'float':
@@ -723,13 +743,14 @@ if model_view == "Model Family" or not coach_output:
                                     param_def.get('help', param_name),
                                     min_value=param_def['min'],
                                     max_value=param_def['max'],
-                                    value=param_def['default'],
+                                    value=default_val,
                                     format=format_str,
                                     key=param_key
                                 )
                             elif param_def['type'] == 'select':
                                 options = param_def['options']
-                                default_idx = options.index(param_def['default'])
+                                default_val = automl_best.get(param_name, param_def['default'])
+                                default_idx = options.index(default_val) if default_val in options else options.index(param_def['default'])
                                 params[param_name] = st.selectbox(
                                     param_def.get('help', param_name),
                                     options=options,
@@ -756,7 +777,7 @@ st.session_state.model_config = model_config
 
 # Pre-training coach tips
 coach_output = st.session_state.get('coach_output')
-with st.expander("🎓 Pre-training Coach Tips", expanded=False):
+with st.expander("Pre-training Coach Tips", expanded=False):
     if coach_output and hasattr(coach_output, 'preprocessing_recommendations') and coach_output.preprocessing_recommendations:
         st.markdown("**Preprocessing checklist (from Coach):**")
         for prep in coach_output.preprocessing_recommendations[:5]:
@@ -766,8 +787,132 @@ with st.expander("🎓 Pre-training Coach Tips", expanded=False):
         st.info("Run EDA and check the Model Selection Coach for preprocessing recommendations.")
     st.markdown("**Tip:** Ensure your preprocessing pipeline matches your selected models. Linear models and neural nets require scaling; tree models do not.")
 
+# Auto-tune NN (Optuna) - gate on optuna availability
+_has_optuna = False
+try:
+    import optuna
+    _has_optuna = True
+except Exception:
+    pass
+
+_nn_selected = st.session_state.get("train_model_nn", False)
+if _nn_selected and _has_optuna:
+    st.markdown("---")
+    st.subheader("Auto-tune Neural Network")
+    st.caption("Run Optuna to search for a good NN architecture and training config (e.g. 30 trials), then train the final model with the best params.")
+    if st.button("Auto-tune NN", type="primary", key="automl_nn_button"):
+        NNWeightedHuberWrapper, _, _, _, _ = _get_model_wrappers()
+        model_pipeline = get_preprocessing_pipeline("nn") or get_preprocessing_pipeline()
+        if model_pipeline is None:
+            st.error("Preprocessing pipeline not found. Build a pipeline for NN in the Preprocess page.")
+        else:
+            try:
+                with st.spinner("Auto-tuning NN (Optuna)..."):
+                    model_pipeline.fit(X_train)
+                    Xt = model_pipeline.transform(X_train)
+                    Xv = model_pipeline.transform(X_val)
+                    if hasattr(Xt, "toarray"):
+                        Xt, Xv = Xt.toarray(), Xv.toarray()
+                    yt = to_numpy_1d(y_train)
+                    yv = to_numpy_1d(y_val)
+                    task = task_type_final
+                    seed = st.session_state.get("random_seed", 42)
+                    n_trials = 30
+
+                    def _objective(trial):
+                        num_layers = trial.suggest_int("num_layers", 1, 4)
+                        layer_width = trial.suggest_int("layer_width", 16, 128)
+                        pattern = trial.suggest_categorical("architecture_pattern", ["constant", "pyramid", "funnel"])
+                        activation = trial.suggest_categorical("activation", ["relu", "tanh", "elu"])
+                        dropout = trial.suggest_float("dropout", 0.0, 0.4)
+                        epochs = trial.suggest_int("epochs", 80, 250)
+                        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
+                        lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
+                        weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True)
+                        patience = trial.suggest_int("patience", 15, 40)
+                        if pattern == "constant":
+                            hidden = [layer_width] * num_layers
+                        elif pattern == "pyramid":
+                            hidden = [layer_width * (2 ** i) for i in range(num_layers)]
+                        else:
+                            mw = layer_width * (2 ** (num_layers - 1))
+                            hidden = [mw // (2 ** i) for i in range(num_layers)]
+                        m = NNWeightedHuberWrapper(hidden_layers=hidden, dropout=dropout, task_type=task, activation=activation)
+                        res = m.fit(Xt, yt, Xv, yv, epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay, patience=patience, random_seed=seed)
+                        hist = res.get("history", {}) if isinstance(res, dict) else {}
+                        if task == "regression":
+                            vlm = hist.get("val_rmse", [])
+                            return vlm[-1] if vlm else float("inf")
+                        vlm = hist.get("val_accuracy", [])
+                        return vlm[-1] if vlm else 0.0
+
+                    direction = "minimize" if task == "regression" else "maximize"
+                    study = optuna.create_study(direction=direction)
+                    study.optimize(_objective, n_trials=n_trials, show_progress_bar=False)
+                    best = study.best_params
+                    st.session_state["nn_automl_best_params"] = best
+
+                    num_layers = best["num_layers"]
+                    layer_width = best["layer_width"]
+                    pattern = best["architecture_pattern"]
+                    if pattern == "constant":
+                        hidden_layers = [layer_width] * num_layers
+                    elif pattern == "pyramid":
+                        hidden_layers = [layer_width * (2 ** i) for i in range(num_layers)]
+                    else:
+                        mw = layer_width * (2 ** (num_layers - 1))
+                        hidden_layers = [mw // (2 ** i) for i in range(num_layers)]
+                    model = NNWeightedHuberWrapper(
+                        hidden_layers=hidden_layers,
+                        dropout=best["dropout"],
+                        task_type=task,
+                        activation=best["activation"],
+                    )
+                    res = model.fit(
+                        Xt, yt, Xv, yv,
+                        epochs=best["epochs"],
+                        batch_size=best["batch_size"],
+                        lr=best["lr"],
+                        weight_decay=best["weight_decay"],
+                        patience=best["patience"],
+                        random_seed=seed,
+                    )
+                    from models.nn_whuber import SklearnCompatibleNN
+                    from ml.pipeline import get_feature_names_after_transform
+                    from ml.eval import calculate_regression_metrics, calculate_classification_metrics
+                    sk = SklearnCompatibleNN(model, task)
+                    sk.is_fitted_ = True
+                    sk.n_features_in_ = Xt.shape[1]
+                    if task == "classification":
+                        sk.classes_ = np.unique(yt)
+                    X_test_m = model_pipeline.transform(X_test)
+                    if hasattr(X_test_m, "toarray"):
+                        X_test_m = X_test_m.toarray()
+                    y_pred = model.predict(X_test_m)
+                    if task == "regression":
+                        met = calculate_regression_metrics(to_numpy_1d(y_test), y_pred)
+                    else:
+                        met = calculate_classification_metrics(to_numpy_1d(y_test), y_pred, model.predict_proba(X_test_m))
+                    model_results_nn = {
+                        "metrics": met, "history": res.get("history", {}),
+                        "y_test_pred": y_pred, "y_test": y_test,
+                        "architecture": model.get_architecture_summary(),
+                    }
+                    add_trained_model("nn", model, model_results_nn)
+                    st.session_state.setdefault("fitted_estimators", {})["nn"] = sk
+                    st.session_state.setdefault("fitted_preprocessing_pipelines", {})["nn"] = model_pipeline
+                    st.session_state.setdefault("feature_names_by_model", {})["nn"] = get_feature_names_after_transform(
+                        model_pipeline, data_config.feature_cols
+                    )
+                    st.success(f"Auto-tune complete. Best val {'RMSE' if task == 'regression' else 'accuracy'}: {study.best_value:.4f}. NN trained and stored.")
+            except Exception as e:
+                st.error(f"Auto-tune NN failed: {e}")
+                logger.exception(e)
+elif _nn_selected and not _has_optuna:
+    st.caption("Install optuna (`pip install optuna`) to use Auto-tune NN.")
+
 # Training
-if st.button("🚀 Train Models", type="primary", key="train_models_button") and models_to_train:
+if st.button("Train Models", type="primary", key="train_models_button") and models_to_train:
     # Lazy import model wrappers and evaluation functions only when training
     NNWeightedHuberWrapper, GLMWrapper, HuberGLMWrapper, RFWrapper, RegistryModelWrapper = _get_model_wrappers()
     calculate_regression_metrics, calculate_classification_metrics, perform_cross_validation, analyze_residuals = _get_eval_functions()
@@ -914,10 +1059,10 @@ if st.button("🚀 Train Models", type="primary", key="train_models_button") and
                             cv_folds=cv_folds, task_type=data_config.task_type
                         )
                     except Exception as cv_error:
-                        st.warning(f"⚠️ Cross-validation failed for {model_name}: {cv_error}. Skipping CV.")
+                        st.warning(f"Cross-validation failed for {model_name}: {cv_error}. Skipping CV.")
                         logger.warning(f"CV failed for {model_name}: {cv_error}")
                 elif use_cv and model_name == 'nn':
-                    st.info(f"ℹ️ Cross-validation skipped for Neural Network (PyTorch models use their own validation loop during training)")
+                    st.info("Cross-validation skipped for Neural Network (PyTorch models use their own validation loop during training)")
                 
                 # Store results
                 model_results = {
@@ -952,10 +1097,10 @@ if st.button("🚀 Train Models", type="primary", key="train_models_button") and
                 )
                 
                 progress_bar.progress(1.0)
-                st.success(f"✅ {model_name.upper()} training complete!")
+                st.success(f"{model_name.upper()} training complete!")
                 
             except Exception as e:
-                with st.expander(f"❌ Error training {model_name.upper()}", expanded=True):
+                with st.expander(f"Error training {model_name.upper()}", expanded=True):
                     st.error(f"Training failed: {str(e)}")
                     st.code(str(e), language='python')
                     logger.exception(e)
@@ -967,10 +1112,10 @@ if st.session_state.get('trained_models'):
     plot_training_history, plot_predictions_vs_actual, plot_residuals = _get_visualization_functions()
     calculate_regression_metrics, calculate_classification_metrics, perform_cross_validation, analyze_residuals = _get_eval_functions()
     
-    st.header("📊 Results Comparison")
+    st.header("Results Comparison")
     
     # How to read results explainer
-    with st.expander("📚 How to Read These Results", expanded=False):
+    with st.expander("How to Read These Results", expanded=False):
         if task_type_final == 'regression':
             st.markdown("""
             **Metrics:**
@@ -1035,7 +1180,7 @@ if st.session_state.get('trained_models'):
         if cv_data:
             cv_df = pd.DataFrame(cv_data)
             st.dataframe(cv_df, use_container_width=True)
-            
+
             # Boxplot of CV scores
             fig = go.Figure()
             for name, results in st.session_state.model_results.items():
@@ -1046,9 +1191,27 @@ if st.session_state.get('trained_models'):
                     ))
             fig.update_layout(title="CV Score Distribution", yaxis_title="Score")
             st.plotly_chart(fig, use_container_width=True)
-    
+
+            # Pairwise statistical comparison (paired t or Wilcoxon on fold-level metrics)
+            from ml.eval import compare_models_paired_cv
+            cv_names = [n for n, r in st.session_state.model_results.items() if r.get("cv_results")]
+            paired = compare_models_paired_cv(
+                cv_names,
+                st.session_state.model_results,
+                task_type=data_config.task_type if data_config else "regression",
+            )
+            if paired:
+                with st.expander("Statistical comparison of models (CV)", expanded=False):
+                    st.caption("Pairwise paired tests on fold-level CV scores. Mean Δ = mean(A) − mean(B); p < 0.05 suggests a significant difference.")
+                    rows = []
+                    for (ma, mb), v in paired.items():
+                        mean_d, stat, p, tname = v["mean_delta"], v["stat"], v["p"], v["test_name"]
+                        sig = " *" if (p is not None and np.isfinite(p) and p < 0.05) else ""
+                        rows.append({"Model A": ma.upper(), "Model B": mb.upper(), "Mean Δ": round(mean_d, 4), "Test": tname, "p": round(p, 4) if p is not None and np.isfinite(p) else None, "Significant": "Yes" if (p is not None and np.isfinite(p) and p < 0.05) else "No"})
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
     # Model diagnostics (one tab per model so pred-vs-actual etc. visible for all)
-    st.header("🔍 Model Diagnostics")
+    st.header("Model Diagnostics")
     model_names = list(st.session_state.trained_models.keys())
     if not model_names:
         st.info("No models to show.")

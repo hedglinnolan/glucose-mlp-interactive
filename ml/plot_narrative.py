@@ -101,6 +101,47 @@ def narrative_bland_altman(
     return " ".join(parts)
 
 
+def interpretation_permutation_importance() -> str:
+    """Short guidance: what the numbers mean (literature-based)."""
+    return (
+        "Importance = drop in metric (e.g. RMSE, accuracy) when the feature is shuffled; same units as the metric. "
+        "Values near zero mean little predictive power; larger values indicate the feature matters for predictions. "
+        "Sklearn/Altmann et al."
+    )
+
+
+def interpretation_shap() -> str:
+    """Short guidance: what mean |SHAP| means."""
+    return (
+        "Mean |SHAP| is in prediction units; larger values = larger impact on the model output. "
+        "Lundberg & Lee (2017); use relative magnitudes across features, not absolute thresholds."
+    )
+
+
+def interpretation_partial_dependence() -> str:
+    """Short guidance: what PD axes mean."""
+    return (
+        "Y-axis = average prediction; x-axis = feature value. Scale matches model output. "
+        "Flat lines suggest weak marginal effect; nonlinear shapes suggest transformations or interactions."
+    )
+
+
+def interpretation_bland_altman() -> str:
+    """Short guidance: what LoA and limits mean."""
+    return (
+        "Mean difference = systematic bias; limits of agreement (LoA) = mean ± 1.96 SD of differences. "
+        "Most points within LoA suggests good agreement; points outside indicate larger discrepancies."
+    )
+
+
+def interpretation_robustness() -> str:
+    """Short guidance: what Spearman ρ and top-k overlap mean."""
+    return (
+        "Spearman ρ compares feature importance **ranks** across models; higher ρ = more agreement. "
+        "Top-k overlap = how many top features are shared; high overlap suggests robust interpretations."
+    )
+
+
 def narrative_permutation_importance(
     perm_data: Dict[str, Any], model_name: Optional[str] = None
 ) -> str:
@@ -249,15 +290,27 @@ def narrative_eda_linearity(stats: Dict[str, Any], findings: Optional[List[str]]
     if not stats and not findings:
         return ""
     corrs = stats.get("feature_correlations") if isinstance(stats, dict) else []
+    tests = stats.get("correlation_tests") if isinstance(stats, dict) else []
     parts: List[str] = []
     if corrs:
         top = max(corrs, key=lambda x: x[1]) if corrs else None
         if top:
             fname, r = top[0], top[1]
+            p_str = ""
+            if tests:
+                for t in tests:
+                    if t[0] == fname and len(t) >= 3 and t[2] is not None:
+                        try:
+                            pv = float(t[2])
+                            if pv == pv:
+                                p_str = f" (p={pv:.4f})"
+                        except (TypeError, ValueError):
+                            pass
+                        break
             if r >= 0.7:
-                parts.append(f"Strong linear association for {fname} (|r|≈{r:.2f}); linear models may capture this well.")
+                parts.append(f"Strong linear association for {fname} (|r|≈{r:.2f}){p_str}; linear models may capture this well.")
             elif r >= 0.3:
-                parts.append(f"Moderate association for {fname}; consider transformations or flexible terms if fits are poor.")
+                parts.append(f"Moderate association for {fname}{p_str}; consider transformations or flexible terms if fits are poor.")
             else:
                 parts.append("Weak linear associations across top features; consider nonlinear or tree-based models.")
     if not parts and findings:

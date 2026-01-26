@@ -18,6 +18,12 @@ from ml.eval import calculate_regression_metrics, calculate_classification_metri
 from ml.clinical_units import infer_unit
 from ml.physiology_reference import load_reference_bundle, match_variable_key, get_reference_interval
 from ml.outliers import detect_outliers
+from ml.stats_tests import (
+    correlation_test,
+    two_sample_location_test,
+    categorical_association_test,
+    normality_check,
+)
 
 
 def plausibility_check(
@@ -238,27 +244,34 @@ def missingness_scan(
     
     # Missingness vs target association
     if signals.task_type_final == 'regression':
-        # Compare target mean for missing vs non-missing
+        target_vals = df[target].dropna().values
+        _, norm_p, _ = normality_check(target_vals)
+        parametric = not (norm_p < 0.05 if not (norm_p != norm_p) else False)
         associations = []
-        for col in signals.high_missing_cols[:10]:  # Limit to top 10
+        for col in signals.high_missing_cols[:10]:
             if col in df.columns and col != target:
                 missing_mask = df[col].isnull()
                 if missing_mask.sum() > 0 and (~missing_mask).sum() > 0:
-                    target_missing = df.loc[missing_mask, target].mean()
-                    target_nonmissing = df.loc[~missing_mask, target].mean()
-                    diff = abs(target_missing - target_nonmissing)
-                    associations.append({
-                        'Column': col,
-                        'Target Mean (Missing)': target_missing,
-                        'Target Mean (Non-Missing)': target_nonmissing,
-                        'Difference': diff
-                    })
-        
+                    t_m = df.loc[missing_mask, target].dropna().values
+                    t_nm = df.loc[~missing_mask, target].dropna().values
+                    if len(t_m) >= 2 and len(t_nm) >= 2:
+                        stat, p, name = two_sample_location_test(t_m, t_nm, parametric)
+                        associations.append({
+                            'Column': col,
+                            'Target Mean (Missing)': float(np.mean(t_m)),
+                            'Target Mean (Non-Missing)': float(np.mean(t_nm)),
+                            'Difference': float(abs(np.mean(t_m) - np.mean(t_nm))),
+                            'Test': name,
+                            'p-value': p,
+                        })
         if associations:
             assoc_df = pd.DataFrame(associations).sort_values('Difference', ascending=False)
             figures.append(('table', assoc_df))
             findings.append("Missingness may be informative (associated with target)")
-            # Add insight
+            for row in assoc_df.head(3).itertuples():
+                pv = getattr(row, 'p_value', None)
+                if pv is not None and np.isfinite(pv):
+                    findings.append(f"  {row.Column}: {row.Test} p={pv:.4f}")
             top_assoc = assoc_df.iloc[0] if len(assoc_df) > 0 else None
             if top_assoc is not None and top_assoc['Difference'] > 0:
                 insight_finding = f"Missingness in {top_assoc['Column']} correlates with target (Δ={top_assoc['Difference']:.2f})"
@@ -266,29 +279,39 @@ def missingness_scan(
                 try:
                     from utils.storyline import add_insight
                     add_insight('missingness_association', insight_finding, insight_implication, 'data_quality')
-                except:
+                except Exception:
                     pass
     elif signals.task_type_final == 'classification':
-        # Compare class proportions
         associations = []
         for col in signals.high_missing_cols[:10]:
             if col in df.columns and col != target:
                 missing_mask = df[col].isnull()
-                if missing_mask.sum() > 0:
-                    missing_class_prop = df.loc[missing_mask, target].value_counts(normalize=True)
-                    nonmissing_class_prop = df.loc[~missing_mask, target].value_counts(normalize=True)
-                    # Simple difference metric
-                    if len(missing_class_prop) > 0 and len(nonmissing_class_prop) > 0:
-                        max_diff = abs(missing_class_prop - nonmissing_class_prop).max()
+                if missing_mask.sum() > 0 and (~missing_mask).sum() > 0:
+                    cont = pd.crosstab(missing_mask, df[target])
+                    if cont.size >= 1:
+                        stat, p, name = categorical_association_test(cont.values, use_fisher=(cont.shape == (2, 2)))
+                        max_diff = 0.0
+                        try:
+                            mp = df.loc[missing_mask, target].value_counts(normalize=True)
+                            np_ = df.loc[~missing_mask, target].value_counts(normalize=True)
+                            com = mp.reindex(np_.index, fill_value=0).fillna(0)
+                            max_diff = (np_.reindex(com.index, fill_value=0) - com).abs().max()
+                        except Exception:
+                            pass
                         associations.append({
                             'Column': col,
-                            'Max Class Prop Difference': max_diff
+                            'Max Class Prop Difference': max_diff,
+                            'Test': name,
+                            'p-value': p,
                         })
-        
         if associations:
             assoc_df = pd.DataFrame(associations).sort_values('Max Class Prop Difference', ascending=False)
             figures.append(('table', assoc_df))
             findings.append("Missingness may be informative (associated with class)")
+            for row in assoc_df.head(3).itertuples():
+                pv = getattr(row, 'p_value', None)
+                if pv is not None and np.isfinite(pv):
+                    findings.append(f"  {row.Column}: {row.Test} p={pv:.4f}")
     
     return {
         'findings': findings,
@@ -329,10 +352,10 @@ def cohort_split_guidance(
         )
         figures.append(('plotly', fig))
         
-        warnings.append("⚠️ Must use group-based splitting to prevent data leakage")
+        warnings.append("Must use group-based splitting to prevent data leakage")
         warnings.append("Random splits will leak information across train/test")
     else:
-        warnings.append("⚠️ Entity ID not specified - cannot use group-based splitting")
+        warnings.append("Entity ID not specified - cannot use group-based splitting")
     
     return {
         'findings': findings,
@@ -630,7 +653,7 @@ def leakage_scan(
         })
         figures.append(('table', leakage_df))
         findings.append(f"Found {len(signals.leakage_candidate_cols)} columns with >0.95 correlation to target")
-        warnings.append("⚠️ These columns should be excluded from features to prevent leakage")
+        warnings.append("These columns should be excluded from features to prevent leakage")
     else:
         findings.append("No obvious leakage candidates detected")
     
@@ -817,6 +840,19 @@ def linearity_scatter(
     corrs.sort(key=lambda x: x[1], reverse=True)
     top = [c[0] for c in corrs[:k]]
     stats_dict["feature_correlations"] = corrs[:k]
+
+    if signals.task_type_final == 'regression' and top:
+        _norm = normality_check(df[target].dropna().values)
+        use_spearman = _norm[1] < 0.05 if not np.isnan(_norm[1]) else False
+        method = "spearman" if use_spearman else "pearson"
+        corr_with_p = []
+        for feat in top:
+            r, p, name = correlation_test(df[feat].values, df[target].values, method=method)
+            corr_with_p.append((feat, r, p, name))
+        stats_dict["correlation_tests"] = corr_with_p
+        for feat, r, p, name in corr_with_p[:3]:
+            if not np.isnan(p):
+                findings.append(f"{feat}: r={r:.3f}, p={p:.4f} ({name})")
 
     for feat in top:
         if signals.task_type_final == 'regression':

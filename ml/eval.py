@@ -287,6 +287,45 @@ def analyze_bland_altman(a: np.ndarray, b: np.ndarray) -> Dict[str, Any]:
     }
 
 
+def compare_models_paired_cv(
+    model_names: List[str],
+    model_results: Dict[str, Dict[str, Any]],
+    task_type: str = "regression",
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """
+    Pairwise comparison of models using CV fold-level metrics (paired t or Wilcoxon).
+    Use when use_cv is True and cv_results with 'scores' exist per model.
+
+    Returns:
+        Dict mapping (model_a, model_b) -> {mean_delta, stat, p, test_name}
+        mean_delta = mean(scores_a - scores_b); positive => b better (for MSE).
+    """
+    from ml.stats_tests import paired_location_test, normality_check
+
+    results = {}
+    for i, ma in enumerate(model_names):
+        for mb in model_names[i + 1 :]:
+            ra = model_results.get(ma, {}).get("cv_results") if isinstance(model_results.get(ma), dict) else None
+            rb = model_results.get(mb, {}).get("cv_results") if isinstance(model_results.get(mb), dict) else None
+            if not ra or not rb or "scores" not in ra or "scores" not in rb:
+                continue
+            sa = np.asarray(ra["scores"])
+            sb = np.asarray(rb["scores"])
+            if len(sa) != len(sb) or len(sa) < 2:
+                continue
+            diff = sa - sb
+            _, norm_p, _ = normality_check(diff)
+            parametric = np.isfinite(norm_p) and norm_p >= 0.05
+            stat, p, name = paired_location_test(diff, parametric)
+            results[(ma, mb)] = {
+                "mean_delta": float(np.mean(diff)),
+                "stat": stat,
+                "p": p,
+                "test_name": name,
+            }
+    return results
+
+
 def compare_importance_ranks(
     model_names: List[str],
     perm_importance_dict: Dict[str, Dict[str, Any]],

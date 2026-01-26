@@ -68,8 +68,9 @@ def load_nhanes_reference(reference_url: Optional[str] = None) -> Dict[str, Any]
     return DEFAULT_NHANES_REFERENCE
 
 
+@lru_cache(maxsize=4)
 def load_reference_bundle(reference_url: Optional[str] = None) -> Dict[str, Any]:
-    """Return both empirical NHANES reference and clinical guideline overlays."""
+    """Return both empirical NHANES reference and clinical guideline overlays. Cached per process."""
     return {
         "nhanes": load_nhanes_reference(reference_url),
         "clinical": _build_clinical_guidelines()

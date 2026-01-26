@@ -24,6 +24,25 @@ class UnitHarmonizer(BaseEstimator, TransformerMixin):
         return X_arr * factors
 
 
+def plausibility_row_mask(
+    X: np.ndarray,
+    lower_bounds: Sequence[Optional[float]],
+    upper_bounds: Sequence[Optional[float]],
+) -> np.ndarray:
+    """Compute a row-level mask: True = keep row (all gated cols in range)."""
+    X_arr = np.asarray(X, dtype=float)
+    n_cols = min(X_arr.shape[1], len(lower_bounds), len(upper_bounds))
+    keep = np.ones(X_arr.shape[0], dtype=bool)
+    for idx in range(n_cols):
+        low = lower_bounds[idx] if idx < len(lower_bounds) else None
+        high = upper_bounds[idx] if idx < len(upper_bounds) else None
+        if low is not None and not (isinstance(low, float) and np.isnan(low)):
+            keep &= X_arr[:, idx] >= float(low)
+        if high is not None and not (isinstance(high, float) and np.isnan(high)):
+            keep &= X_arr[:, idx] <= float(high)
+    return keep
+
+
 class PlausibilityGate(BaseEstimator, TransformerMixin):
     """Set values outside empirical plausibility bounds to NaN."""
 

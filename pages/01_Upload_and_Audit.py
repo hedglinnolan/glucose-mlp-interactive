@@ -17,7 +17,7 @@ from utils.datasets import get_builtin_datasets
 from utils.reconcile import reconcile_target_features
 from utils.state_reconcile import reconcile_state_with_df
 from utils.storyline import render_progress_indicator
-from data_processor import load_and_preview_csv, get_numeric_columns
+from data_processor import load_and_preview_csv, get_numeric_columns, get_selectable_columns
 from ml.triage import detect_task_type, detect_cohort_structure
 from ml.eda_recommender import compute_dataset_signals
 
@@ -51,7 +51,7 @@ def _choose_replace_action(key: str, new_label: str) -> str:
     if existing_label:
         st.info(f"Current dataset: {existing_label}")
     if existing_label and new_label and new_label != existing_label:
-        st.warning("⚠️ New dataset name differs from the current one.")
+        st.warning("New dataset name differs from the current one.")
     return st.radio(
         "Choose how to handle the existing dataset:",
         ["Overwrite existing dataset", "Create a new version", "Cancel"],
@@ -66,17 +66,17 @@ init_session_state()
 
 st.set_page_config(
     page_title="Upload & Audit",
-    page_icon="📁",
+    page_icon=None,
     layout="wide"
 )
 
-st.title("📁 Upload & Data Audit")
+st.title("Upload & Data Audit")
 
 # Progress indicator
 render_progress_indicator("01_Upload_and_Audit")
 
 # Built-in datasets
-st.header("📚 Built-in Datasets (for Testing)")
+st.header("Built-in Datasets (for Testing)")
 dataset_options = ['None (Upload CSV)'] + list(get_builtin_datasets().keys())
 selected_dataset = st.selectbox(
     "Or try a built-in dataset:",
@@ -95,7 +95,7 @@ if selected_dataset != 'None (Upload CSV)':
     
     if st.button("Generate Dataset", key="generate_dataset_button"):
         if existing_data is not None and replace_action == "Cancel":
-            st.info("ℹ️ Dataset replacement cancelled.")
+            st.info("Dataset replacement cancelled.")
         else:
             if existing_data is not None and replace_action == "Create a new version":
                 _archive_current_dataset("versioned")
@@ -107,9 +107,8 @@ if selected_dataset != 'None (Upload CSV)':
             st.session_state.dataset_id = dataset_id
             st.session_state.data_filename = selected_dataset
             st.session_state.data_source = f"Built-in: {selected_dataset} (v{dataset_id})"
-            # Reconcile state with new data
             reconcile_state_with_df(df_builtin, st.session_state)
-            st.success(f"✅ Generated {len(df_builtin)} rows")
+            st.success(f"Generated {len(df_builtin)} rows")
 
 # File upload
 st.header("📤 Upload CSV File")
@@ -143,15 +142,14 @@ if uploaded_file is not None:
                 st.session_state.dataset_id = dataset_id
                 st.session_state.data_filename = uploaded_file.name
                 st.session_state.data_source = f"Uploaded CSV: {uploaded_file.name} (v{dataset_id})"
-                # Reconcile state with new data
                 reconcile_state_with_df(df, st.session_state)
-                st.success(f"✅ Loaded {len(df):,} rows × {len(df.columns)} columns")
+                st.success(f"Loaded {len(df):,} rows × {len(df.columns)} columns")
         except Exception as e:
-            st.error(f"❌ Error loading data: {str(e)}")
+            st.error(f"Error loading data: {e}")
             logger.exception(e)
             df = None
     elif existing_data is not None and replace_action == "Cancel":
-        st.info("ℹ️ Upload ignored. Existing dataset preserved.")
+        st.info("Upload ignored. Existing dataset preserved.")
 
 # Use latest from session state (updated by built-in or upload)
 df = get_data()
@@ -162,12 +160,12 @@ if df is not None:
     try:
         
         # Data preview
-        with st.expander("📋 Data Preview", expanded=True):
+        with st.expander("Data Preview", expanded=True):
             st.dataframe(df.head(20), use_container_width=True)
             st.info(f"**Shape:** {df.shape[0]:,} rows × {df.shape[1]} columns")
         
         # Data Audit
-        st.header("🔍 Data Audit")
+        st.header("Data Audit")
         
         audit_results = {}
         
@@ -186,7 +184,7 @@ if df is not None:
             st.dataframe(missing_df, use_container_width=True)
             audit_results['missing'] = missing_df.to_dict('records')
         else:
-            st.success("✅ No missing values found")
+            st.success("No missing values found")
             audit_results['missing'] = []
         
         # Data types
@@ -203,10 +201,10 @@ if df is not None:
         st.subheader("Duplicate Rows")
         n_duplicates = df.duplicated().sum()
         if n_duplicates > 0:
-            st.warning(f"⚠️ Found {n_duplicates:,} duplicate rows ({n_duplicates/len(df)*100:.2f}%)")
+            st.warning(f"Found {n_duplicates:,} duplicate rows ({n_duplicates/len(df)*100:.2f}%)")
             audit_results['duplicates'] = n_duplicates
         else:
-            st.success("✅ No duplicate rows found")
+            st.success("No duplicate rows found")
             audit_results['duplicates'] = 0
         
         # Constant columns
@@ -217,10 +215,10 @@ if df is not None:
                 constant_cols.append(col)
         
         if constant_cols:
-            st.warning(f"⚠️ Found {len(constant_cols)} constant columns: {', '.join(constant_cols)}")
+            st.warning(f"Found {len(constant_cols)} constant columns: {', '.join(constant_cols)}")
             audit_results['constant_cols'] = constant_cols
         else:
-            st.success("✅ No constant columns found")
+            st.success("No constant columns found")
             audit_results['constant_cols'] = []
         
         # High cardinality categoricals
@@ -235,11 +233,11 @@ if df is not None:
                 })
         
         if high_card_cols:
-            st.warning(f"⚠️ Found {len(high_card_cols)} high-cardinality columns")
+            st.warning(f"Found {len(high_card_cols)} high-cardinality columns")
             st.dataframe(pd.DataFrame(high_card_cols), use_container_width=True)
             audit_results['high_cardinality'] = high_card_cols
         else:
-            st.success("✅ No high-cardinality categorical columns")
+            st.success("No high-cardinality categorical columns")
             audit_results['high_cardinality'] = []
         
         # Target leakage candidates (correlation with potential targets)
@@ -260,11 +258,11 @@ if df is not None:
                     })
             
             if leakage_candidates:
-                st.warning(f"⚠️ Found {len(leakage_candidates)} potential leakage candidates")
+                st.warning(f"Found {len(leakage_candidates)} potential leakage candidates")
                 st.dataframe(pd.DataFrame(leakage_candidates), use_container_width=True)
                 audit_results['leakage_candidates'] = leakage_candidates
             else:
-                st.success("✅ No obvious target leakage candidates")
+                st.success("No obvious target leakage candidates")
                 audit_results['leakage_candidates'] = []
         else:
             audit_results['leakage_candidates'] = []
@@ -277,10 +275,10 @@ if df is not None:
                 id_like_cols.append(col)
         
         if id_like_cols:
-            st.warning(f"⚠️ Found {len(id_like_cols)} ID-like columns: {', '.join(id_like_cols)}")
+            st.warning(f"Found {len(id_like_cols)} ID-like columns: {', '.join(id_like_cols)}")
             audit_results['id_like_cols'] = id_like_cols
         else:
-            st.success("✅ No obvious ID-like columns")
+            st.success("No obvious ID-like columns")
             audit_results['id_like_cols'] = []
         
         # Store audit results
@@ -301,7 +299,7 @@ if df is not None:
                 st.session_state.cohort_structure_detection = cohort_detection
         
         # Recommendations
-        st.header("💡 Recommendations")
+        st.header("Recommendations")
         recommendations = []
         
         if audit_results['missing']:
@@ -319,46 +317,48 @@ if df is not None:
             for i, rec in enumerate(recommendations, 1):
                 st.info(f"{i}. {rec}")
         else:
-            st.success("✅ No major issues detected. Data looks good!")
+            st.success("No major issues detected. Data looks good!")
         
         # Target and feature selection
-        st.header("🎯 Select Target & Features")
-        
+        st.header("Select Target & Features")
+        numeric_cols_sel, categorical_cols_sel = get_selectable_columns(df)
+        selectable_flat = numeric_cols_sel + categorical_cols_sel
+
         # Get existing config or initialize
         existing_config = st.session_state.get('data_config')
         existing_target = existing_config.target_col if existing_config else None
         existing_features = existing_config.feature_cols if existing_config else []
-        
+
         # Reconcile with current data
         if existing_target:
             existing_target, existing_features = reconcile_target_features(
-                df, existing_target, existing_features, numeric_cols
+                df, existing_target, existing_features, (numeric_cols_sel, categorical_cols_sel)
             )
-        
+
         col1, col2 = st.columns(2)
-        
+
         with col1:
-            # Target selection - use existing or default (first numeric when none)
-            if existing_target and existing_target in numeric_cols:
-                target_default_idx = numeric_cols.index(existing_target) + 1
-            elif numeric_cols:
-                target_default_idx = 1  # first numeric so target/features autopopulate after upload
+            # Target selection - use existing or default (first selectable when none)
+            if existing_target and existing_target in selectable_flat:
+                target_default_idx = selectable_flat.index(existing_target) + 1
+            elif selectable_flat:
+                target_default_idx = 1
             else:
                 target_default_idx = 0
             target_col = st.selectbox(
                 "Target Variable",
-                options=[''] + numeric_cols,
+                options=[''] + selectable_flat,
                 index=target_default_idx,
                 key="target_selectbox",
-                help="Select the column you want to predict"
+                help="Select the column you want to predict (numeric or categorical)"
             )
-        
+
         with col2:
             # Feature selection - reconcile with target
             target_col_reconciled, _ = reconcile_target_features(
-                df, target_col, existing_features, numeric_cols
+                df, target_col, existing_features, (numeric_cols_sel, categorical_cols_sel)
             )
-            feature_options = [col for col in numeric_cols if col != target_col_reconciled]
+            feature_options = [col for col in selectable_flat if col != target_col_reconciled]
             
             # Read from session_state if available, otherwise use existing
             features_from_state = st.session_state.get('upload_features_multiselect')
@@ -399,17 +399,17 @@ if df is not None:
         if target_col and selected_features:
             # Reconcile target and features
             target_col, selected_features = reconcile_target_features(
-                df, target_col, selected_features, numeric_cols
+                df, target_col, selected_features, (numeric_cols_sel, categorical_cols_sel)
             )
             
             # Show warning if features were adjusted
             if existing_features and set(selected_features) != set(existing_features):
                 removed = set(existing_features) - set(selected_features)
                 if removed:
-                    st.info(f"ℹ️ Removed invalid features: {', '.join(removed)}")
+                    st.info(f"Removed invalid features: {', '.join(removed)}")
             
             if not target_col or not selected_features:
-                st.warning("⚠️ Please select both target and at least one feature")
+                st.warning("Please select both target and at least one feature")
             else:
                 # Run task type detection when target is selected/changed
                 task_detection = st.session_state.get('task_type_detection', TaskTypeDetection())
@@ -430,7 +430,7 @@ if df is not None:
                         st.session_state.task_type_detection = task_detection
                 
                 # Auto-detection panel
-                st.subheader("🔍 Auto-Detection Results")
+                st.subheader("Auto-Detection Results")
                 
                 col1, col2 = st.columns(2)
                 
@@ -438,30 +438,30 @@ if df is not None:
                     st.markdown("**Task Type Detection**")
                     task_det = st.session_state.task_type_detection
                     if task_det.detected:
-                        confidence_emoji = {"high": "🟢", "med": "🟡", "low": "🟠"}.get(task_det.confidence, "⚪")
-                        st.write(f"{confidence_emoji} Detected: **{task_det.detected.title()}** ({task_det.confidence} confidence)")
+                        confidence_label = {"high": "high", "med": "medium", "low": "low"}.get(task_det.confidence, "unknown")
+                        st.write(f"Detected: **{task_det.detected.title()}** ({confidence_label} confidence)")
                         with st.expander("Detection reasons"):
                             for reason in task_det.reasons:
                                 st.write(f"• {reason}")
                     else:
-                        st.write("⚪ Not detected yet")
+                        st.write("Not detected yet")
                 
                 with col2:
                     st.markdown("**Cohort Structure Detection**")
                     cohort_det = st.session_state.cohort_structure_detection
                     if cohort_det.detected:
-                        confidence_emoji = {"high": "🟢", "med": "🟡", "low": "🟠"}.get(cohort_det.confidence, "⚪")
-                        st.write(f"{confidence_emoji} Detected: **{cohort_det.detected.replace('_', ' ').title()}** ({cohort_det.confidence} confidence)")
+                        cohort_conf = {"high": "high", "med": "medium", "low": "low"}.get(cohort_det.confidence, "unknown")
+                        st.write(f"Detected: **{cohort_det.detected.replace('_', ' ').title()}** ({cohort_conf} confidence)")
                         with st.expander("Detection reasons"):
                             for reason in cohort_det.reasons:
                                 st.write(f"• {reason}")
                         if cohort_det.entity_id_detected:
                             st.write(f"Entity ID: `{cohort_det.entity_id_detected}`")
                     else:
-                        st.write("⚪ Not detected yet")
+                        st.write("Not detected yet")
                 
                 # Override controls
-                st.subheader("⚙️ Manual Overrides")
+                st.subheader("Manual Overrides")
                 
                 # Task type override - read from session_state
                 task_override_enabled = st.checkbox(
@@ -565,7 +565,7 @@ if df is not None:
                 # Warn if task type changed
                 if existing_config and existing_config.task_type and existing_config.task_type != task_type_final:
                     if task_type_final == 'classification' and existing_config.task_type == 'regression':
-                        st.info("ℹ️ Switched to classification. Ensure target has discrete values.")
+                        st.info("Switched to classification. Ensure target has discrete values.")
             
             # Store configuration (use final values)
             data_config = DataConfig(
@@ -578,15 +578,15 @@ if df is not None:
             
             # Time-series warning (will check in Train page)
             if datetime_col:
-                st.info("ℹ️ Datetime column selected. You can enable time-based splitting in the Train & Compare page.")
+                st.info("Datetime column selected. You can enable time-based splitting in the Train & Compare page.")
             
             # Safe getter for task type display
             task_type_display = task_type_final if task_type_final else (task_detection.detected if task_detection.detected else "regression")
-            st.success(f"✅ Configuration saved: {task_type_display.title()} task with {len(selected_features)} features")
+            st.success(f"Configuration saved: {task_type_display.title()} task with {len(selected_features)} features")
             
             # "What you should do next" guidance
             st.markdown("---")
-            st.header("🎯 What You Should Do Next")
+            st.header("What You Should Do Next")
             
             next_steps = []
             
@@ -595,7 +595,7 @@ if df is not None:
                 missing_cols = df[selected_features].isnull().sum()
                 high_missing = missing_cols[missing_cols > len(df) * 0.05]
                 if len(high_missing) > 0:
-                    next_steps.append(f"🔍 **High missingness** in {len(high_missing)} columns → Run 'Missingness Scan' in EDA page")
+                    next_steps.append(f"**High missingness** in {len(high_missing)} columns → Run 'Missingness Scan' in EDA page")
             
             # Check for unit issues
             if df is not None and target_col:
@@ -608,11 +608,11 @@ if df is not None:
                     outlier_method=st.session_state.get("eda_outlier_method", "iqr")
                 )
                 if signals.physio_plausibility_flags:
-                    next_steps.append("⚖️ **Physiologic plausibility flags** detected → Run 'Physiologic Plausibility Check' in EDA page")
+                    next_steps.append("**Physiologic plausibility flags** detected → Run 'Physiologic Plausibility Check' in EDA page")
             
             # Check for longitudinal
             if cohort_type_final == 'longitudinal' and entity_id_final:
-                next_steps.append(f"👥 **Longitudinal data** detected (Entity ID: {entity_id_final}) → Use group-based splitting in Train & Compare page")
+                next_steps.append(f"**Longitudinal data** detected (Entity ID: {entity_id_final}) → Use group-based splitting in Train & Compare page")
             
             # Check for outliers (regression)
             if task_type_final == 'regression' and df is not None and target_col:
@@ -622,16 +622,16 @@ if df is not None:
                     iqr = q3 - q1
                     outliers = ((target_data < q1 - 1.5*iqr) | (target_data > q3 + 1.5*iqr)).sum()
                     if outliers > len(target_data) * 0.1:
-                        next_steps.append(f"📊 **High outlier rate** ({outliers/len(target_data):.1%}) → Consider robust models (Huber) or tree-based models")
+                        next_steps.append(f"**High outlier rate** ({outliers/len(target_data):.1%}) → Consider robust models (Huber) or tree-based models")
             
             if not next_steps:
-                next_steps.append("✅ **Ready for EDA** → Go to EDA page to explore relationships and patterns")
+                next_steps.append("**Ready for EDA** → Go to EDA page to explore relationships and patterns")
             
             for step in next_steps:
                 st.markdown(f"• {step}")
             
             # State Debug (Advanced)
-            with st.expander("🔧 Advanced / State Debug", expanded=False):
+            with st.expander("Advanced / State Debug", expanded=False):
                 st.markdown("**Current State:**")
                 st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
                 st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
@@ -646,11 +646,11 @@ if df is not None:
         else:
             # Target not yet selected - show guidance
             st.markdown("---")
-            st.header("🎯 What You Should Do Next")
-            st.info("👆 **Select a target variable** above to unlock cohort auditing recommendations and proceed to EDA.")
+            st.header("What You Should Do Next")
+            st.info("**Select a target variable** above to unlock cohort auditing recommendations and proceed to EDA.")
         
     except Exception as e:
-        st.error(f"❌ Error loading data: {str(e)}")
+        st.error(f"Error loading data: {e}")
         logger.exception(e)
 else:
     st.info("👈 Please upload a CSV file to get started")

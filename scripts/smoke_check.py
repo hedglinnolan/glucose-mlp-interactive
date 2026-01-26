@@ -36,27 +36,27 @@ def test(name: str, requires: List[str] = None):
                         __import__(pkg)
                     except ImportError:
                         results.append((name, None, f"SKIPPED (requires {pkg})"))
-                        print(f"⏭️  {name}: SKIPPED (requires {pkg})")
+                        print(f"SKIP {name}: SKIPPED (requires {pkg})")
                         return
             
             try:
                 func()
                 results.append((name, True, "PASS"))
-                print(f"✅ {name}")
+                print(f"PASS {name}")
             except ImportError as e:
                 # Skip tests that fail due to missing packages
                 pkg_name = str(e).replace("No module named ", "").strip("'")
                 if pkg_name in ['streamlit', 'torch', 'shap']:
                     results.append((name, None, f"SKIPPED (requires {pkg_name})"))
-                    print(f"⏭️  {name}: SKIPPED (requires {pkg_name})")
+                    print(f"SKIP {name}: SKIPPED (requires {pkg_name})")
                 else:
                     results.append((name, False, str(e)))
-                    print(f"❌ {name}: {e}")
+                    print(f"FAIL {name}: {e}")
                     if "--verbose" in sys.argv:
                         traceback.print_exc()
             except Exception as e:
                 results.append((name, False, str(e)))
-                print(f"❌ {name}: {e}")
+                print(f"FAIL {name}: {e}")
                 if "--verbose" in sys.argv:
                     traceback.print_exc()
         return wrapper
@@ -618,8 +618,9 @@ def test_upload_flow():
         def __setattr__(self, k, v):
             self[k] = v
 
-    from data_processor import load_and_preview_csv, get_numeric_columns
+    from data_processor import load_and_preview_csv, get_numeric_columns, get_selectable_columns
     from utils.state_reconcile import reconcile_state_with_df
+    from utils.reconcile import reconcile_target_features
     from utils.session_state import DataConfig
 
     csv = "a,b,c\n1,2,3\n4,5,6\n7,8,9"
@@ -635,6 +636,37 @@ def test_upload_flow():
     reconcile_state_with_df(df, session)
     cfg = session.get("data_config")
     assert cfg is not None and cfg.target_col == "c" and set(cfg.feature_cols) == {"a", "b"}
+
+    num_sel, cat_sel = get_selectable_columns(df)
+    t, f = reconcile_target_features(df, "c", ["a", "b"], (num_sel, cat_sel))
+    assert t == "c" and set(f) == {"a", "b"}
+
+
+@test("Stats tests: correlation, normality, paired")
+def test_stats_tests():
+    import numpy as np
+    from ml.stats_tests import (
+        correlation_test,
+        normality_check,
+        paired_location_test,
+        two_sample_location_test,
+        categorical_association_test,
+    )
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y = np.array([1.1, 2.2, 2.9, 4.1, 4.8])
+    r, p, name = correlation_test(x, y, method="pearson")
+    assert abs(r) > 0.9 and 0 <= p <= 1 and "Pearson" in name
+    stat, pn, nn = normality_check(x)
+    assert nn == "Shapiro–Wilk"
+    diff = np.array([0.1, -0.1, 0.2, 0.0, -0.1])
+    st, pp, nm = paired_location_test(diff, parametric=True)
+    assert nm == "paired t-test"
+    a, b = np.array([1, 2, 3]), np.array([2, 3, 4])
+    st2, p2, n2 = two_sample_location_test(a, b, parametric=True)
+    assert "t-test" in n2
+    cont = np.array([[10, 20], [15, 25]])
+    st3, p3, n3 = categorical_association_test(cont, use_fisher=False)
+    assert "chi" in n3.lower()
 
 
 @test("EDA: narrative helpers + data_sufficiency_check")
@@ -721,6 +753,7 @@ def run_all_tests():
     test_unit_harmonizer()
     test_outlier_capping()
     test_compare_importance_ranks()
+    test_stats_tests()
     test_plot_bland_altman()
     test_eval_extended_stats()
     test_plot_narrative()
@@ -737,9 +770,9 @@ def run_all_tests():
     total = len(results)
     
     if failed == 0:
-        print(f"✅ All tests passed! ({passed} passed, {skipped} skipped)")
+        print(f"All tests passed! ({passed} passed, {skipped} skipped)")
     else:
-        print(f"❌ {failed}/{total} tests failed ({passed} passed, {skipped} skipped):")
+        print(f"FAIL {failed}/{total} tests failed ({passed} passed, {skipped} skipped):")
         for name, success, msg in results:
             if success is False:
                 print(f"   - {name}: {msg}")

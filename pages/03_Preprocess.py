@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import copy
+import time
 from typing import List, Dict, Any, Optional
 
 from utils.session_state import (
@@ -20,33 +21,38 @@ from ml.pipeline import (
     get_feature_names_after_transform,
     build_unit_harmonization_config,
     build_plausibility_bounds,
+    apply_plausibility_filter,
 )
 from ml.model_registry import get_registry
 from data_processor import get_numeric_columns
+
+@st.cache_resource
+def _get_registry_cached():
+    return get_registry()
 from utils.widget_helpers import safe_option_index
 
 init_session_state()
 
-st.set_page_config(page_title="Preprocessing", page_icon="⚙️", layout="wide")
-st.title("⚙️ Preprocessing Builder")
+st.set_page_config(page_title="Preprocessing", page_icon=None, layout="wide")
+st.title("Preprocessing Builder")
 
 # Progress indicator
 render_progress_indicator("03_Preprocess")
 
 df = get_data()
 if df is None:
-    st.warning("⚠️ Please upload data in the Upload & Audit page first")
+    st.warning("Please upload data in the Upload & Audit page first")
     st.stop()
 
 data_config: Optional[DataConfig] = st.session_state.get('data_config')
 if data_config is None or not data_config.target_col:
-    st.warning("⚠️ Please select target and features in the Upload & Audit page first")
+    st.warning("Please select target and features in the Upload & Audit page first")
     st.stop()
 
 # Identify feature types (safe access with defaults)
 all_features = data_config.feature_cols if data_config else []
 if not all_features:
-    st.warning("⚠️ No features selected. Please select features in the Upload & Audit page first")
+    st.warning("No features selected. Please select features in the Upload & Audit page first")
     st.stop()
 
 numeric_cols = get_numeric_columns(df)
@@ -72,14 +78,14 @@ _eda_collinearity = any('collinearity' in str(k).lower() or 'multicollinearity' 
 # 1. MODEL SELECTION FIRST
 # ============================================================================
 st.markdown("---")
-st.header("📋 Select models for preprocessing")
+st.header("Select models for preprocessing")
 st.caption("Select models below; these choices drive pipeline options and are used on Train & Compare.")
 task_type_det = st.session_state.get("task_type_detection") or TaskTypeDetection()
 task_type_final = (getattr(task_type_det, "final", None) or (data_config.task_type if data_config else None) or "regression")
 if data_config:
     data_config.task_type = task_type_final
 
-registry_prep = get_registry()
+registry_prep = _get_registry_cached()
 available_prep = {
     k: v for k, v in registry_prep.items()
     if (task_type_final == "regression" and v.capabilities.supports_regression)
@@ -112,7 +118,7 @@ else:
 # 2. INTERPRETABILITY (GLOBAL) + CONFIGURE PIPELINE PER MODEL
 # ============================================================================
 st.markdown("---")
-st.header("🔧 Configure pipeline per model")
+st.header("Configure pipeline per model")
 st.caption("Click a model to expand and set preprocessing options. Then scroll down and click **Build Pipelines** once.")
 
 preprocessing_config = st.session_state.get("preprocessing_config", {}) or {}
@@ -128,7 +134,7 @@ interpretability_mode = st.selectbox(
     key="interpretability_mode",
     help="High disables log transform, PCA, KMeans. Balanced/Performance allow them.",
 )
-with st.expander("📚 Interpretability vs Performance", expanded=False):
+with st.expander("Interpretability vs Performance", expanded=False):
     st.markdown("**High:** Disables log, PCA, KMeans. **Performance:** Allows them. **Balanced:** Default.")
 
 def _interpretability_guidance(
@@ -179,9 +185,9 @@ def _cfg(mk: str, key: str, default: Any, from_global: bool = True) -> Any:
 for _mk in _config_keys:
     with st.expander(f"Configure {_mk.upper()}", expanded=False):
         # Slicing / cutting
-        st.subheader("✂️ Slicing / cutting")
+        st.subheader("Slicing / cutting")
         if _eda_outliers:
-            st.caption("💡 EDA found outliers → consider outlier treatment or plausibility gating.")
+            st.caption("EDA found outliers; consider outlier treatment or plausibility gating.")
         _c1, _c2 = st.columns(2)
         with _c1:
             if numeric_features:
@@ -197,13 +203,23 @@ for _mk in _config_keys:
             else:
                 _ot = "none"
         with _c2:
-            st.checkbox("Plausibility gating (NHANES)", value=bool(_cfg(_mk, "plausibility_gating", False)), key=f"preprocess_{_mk}_plausibility_gating")
+            _pg = st.checkbox("Plausibility gating (NHANES)", value=bool(_cfg(_mk, "plausibility_gating", False)), key=f"preprocess_{_mk}_plausibility_gating")
+            if _pg:
+                _pm = safe_option_index(["clip", "filter"], _cfg(_mk, "plausibility_mode", "clip"), "clip")
+                st.radio(
+                    "Plausibility mode",
+                    ["clip", "filter"],
+                    index=_pm,
+                    format_func=lambda x: "Clip out-of-range to NaN" if x == "clip" else "Keep only rows within NHANES range",
+                    key=f"preprocess_{_mk}_plausibility_mode",
+                    horizontal=True,
+                )
             st.checkbox("Unit harmonization", value=bool(_cfg(_mk, "unit_harmonization", False)), key=f"preprocess_{_mk}_unit_harmonization")
 
         # Imputing
-        st.subheader("🔄 Imputing")
+        st.subheader("Imputing")
         if _eda_missing:
-            st.caption("💡 EDA found missing values → consider imputation and/or missing indicators.")
+            st.caption("EDA found missing values; consider imputation and/or missing indicators.")
         _c3, _c4 = st.columns(2)
         with _c3:
             _nim = safe_option_index(["median", "mean", "constant"], _cfg(_mk, "numeric_imputation", "median"), "median")
@@ -214,22 +230,22 @@ for _mk in _config_keys:
             st.selectbox("Categorical imputation", ["most_frequent", "constant"], index=_cim, key=f"preprocess_{_mk}_categorical_imputation")
 
         # Transformations
-        st.subheader("📐 Transformations")
+        st.subheader("Transformations")
         _scl = safe_option_index(["standard", "robust", "none"], _cfg(_mk, "numeric_scaling", "standard"), "standard")
         st.selectbox("Scaling", ["standard", "robust", "none"], index=_scl, key=f"preprocess_{_mk}_numeric_scaling")
         st.checkbox("Log transform (log(1+x))", value=bool(_cfg(_mk, "numeric_log_transform", False)), key=f"preprocess_{_mk}_numeric_log_transform")
 
         # Encoding
-        st.subheader("📦 Encoding")
+        st.subheader("Encoding")
         st.caption("One-hot creates a binary column per category; high-cardinality variables increase feature count.")
         st.selectbox("Categorical encoding", ["onehot"], index=0, key=f"preprocess_{_mk}_categorical_encoding")
 
         # Feature augmentation
-        st.subheader("🔬 Feature augmentation")
+        st.subheader("Feature augmentation")
         if _eda_high_pn:
-            st.caption("💡 High feature-to-sample ratio → PCA may help.")
+            st.caption("High feature-to-sample ratio; PCA may help.")
         if _eda_collinearity:
-            st.caption("💡 Collinearity detected → PCA or regularization can help.")
+            st.caption("Collinearity detected; PCA or regularization can help.")
         _uk = bool(_cfg(_mk, "use_kmeans_features", False))
         st.checkbox("KMeans features (adds distances, optional one-hot labels)", value=_uk, key=f"preprocess_{_mk}_use_kmeans")
         st.caption("**What changes:** Adds columns: distances to each cluster centroid and, if enabled, one-hot cluster labels. Original features remain unless PCA is also used.")
@@ -254,11 +270,12 @@ for _mk in _config_keys:
             st.checkbox("Whiten", value=bool(_cfg(_mk, "pca_whiten", False)), key=f"preprocess_{_mk}_pca_whiten")
 
 st.markdown("---")
-if st.button("🔨 Build Pipelines", type="primary", key="preprocess_build_button"):
+if st.button("Build Pipelines", type="primary", key="preprocess_build_button"):
     try:
+        t0 = time.perf_counter()
         with st.spinner("Building pipelines..."):
             _sel = [k.replace("train_model_", "") for k, v in st.session_state.items() if k.startswith("train_model_") and v]
-            registry = get_registry()
+            registry = _get_registry_cached()
             model_keys = _sel if _sel else ["default"]
 
             def _get(mk: str, key: str, default: Any) -> Any:
@@ -294,7 +311,20 @@ if st.button("🔨 Build Pipelines", type="primary", key="preprocess_build_butto
 
             pipelines_by_model = {}
             configs_by_model = {}
-            X_sample = df[all_features]
+            any_filter = any_plaus and plausibility_bounds and any(
+                _get(mk, "plausibility_mode", "clip") == "filter" and _get(mk, "plausibility_gating", False)
+                for mk in model_keys
+            )
+            if any_filter:
+                uf_list = unit_config["conversion_factors"] if unit_config else None
+                filtered_df = apply_plausibility_filter(
+                    df, numeric_features, plausibility_bounds, uf_list
+                )
+                st.session_state["filtered_data"] = filtered_df
+                X_sample = filtered_df[all_features]
+            else:
+                st.session_state.pop("filtered_data", None)
+                X_sample = df[all_features]
             imode = st.session_state.get("interpretability_mode", "balanced")
 
             for model_key in model_keys:
@@ -331,6 +361,7 @@ if st.button("🔨 Build Pipelines", type="primary", key="preprocess_build_butto
                     "pca_whiten": bool(_get(model_key, "pca_whiten", False)),
                     "unit_harmonization": use_unit,
                     "plausibility_gating": use_plaus,
+                    "plausibility_mode": _get(model_key, "plausibility_mode", "clip"),
                     "interpretability_mode": imode,
                 }
                 if unit_config:
@@ -346,6 +377,7 @@ if st.button("🔨 Build Pipelines", type="primary", key="preprocess_build_butto
 
                 uf = unit_config["conversion_factors"] if unit_config and use_unit else None
                 pb = plausibility_bounds if use_plaus and plausibility_bounds else None
+                pmode = model_config["plausibility_mode"]
 
                 temp_pipeline = build_preprocessing_pipeline(
                     numeric_features=numeric_features,
@@ -358,6 +390,7 @@ if st.button("🔨 Build Pipelines", type="primary", key="preprocess_build_butto
                     numeric_outlier_params=model_config["numeric_outlier_params"],
                     unit_harmonization_factors=uf,
                     plausibility_bounds=pb,
+                    plausibility_mode=pmode,
                     categorical_imputation=model_config["categorical_imputation"],
                     categorical_encoding=model_config["categorical_encoding"],
                     use_kmeans_features=model_config["use_kmeans_features"],
@@ -387,6 +420,7 @@ if st.button("🔨 Build Pipelines", type="primary", key="preprocess_build_butto
                     numeric_outlier_params=model_config["numeric_outlier_params"],
                     unit_harmonization_factors=uf,
                     plausibility_bounds=pb,
+                    plausibility_mode=pmode,
                     categorical_imputation=model_config["categorical_imputation"],
                     categorical_encoding=model_config["categorical_encoding"],
                     use_kmeans_features=model_config["use_kmeans_features"],
@@ -451,11 +485,13 @@ if st.button("🔨 Build Pipelines", type="primary", key="preprocess_build_butto
                 "Use Train & Compare to train models; preprocessing is applied per model.",
                 category="preprocessing",
             )
+        elapsed = time.perf_counter() - t0
+        st.session_state.setdefault("last_timings", {})["Build Pipelines"] = round(elapsed, 2)
 
-        st.success("✅ Preprocessing pipelines built successfully! Expand each model below to view recipe and transformed data.")
+        st.success("Preprocessing pipelines built successfully. Expand each model below to view recipe and transformed data.")
         
     except Exception as e:
-        st.error(f"❌ Error building pipeline: {str(e)}")
+        st.error(f"Error building pipeline: {e}")
         st.exception(e)
 
 # Per-model expanders: recipe, overrides, show table, CSV export
@@ -463,15 +499,15 @@ pipelines_by_model = st.session_state.get("preprocessing_pipelines_by_model") or
 configs_by_model = st.session_state.get("preprocessing_config_by_model") or {}
 if pipelines_by_model:
     st.markdown("---")
-    st.header("📋 Pipelines by model")
+    st.header("Pipelines by model")
     st.caption("Expand each model to view recipe and overrides. Use «Show transformed table» to preview values, then «Download as CSV» to export.")
     X_sample_preview = df[all_features]
     for model_key, pipeline in pipelines_by_model.items():
         _show = st.session_state.get(f"show_preview_{model_key}", False)
         with st.expander(f"Pipeline for {model_key.upper()}", expanded=(model_key == "default" or _show)):
-            recipe = get_pipeline_recipe(pipeline)
-            st.code(recipe, language=None)
             cfg = configs_by_model.get(model_key, {})
+            recipe = get_pipeline_recipe(pipeline, plausibility_mode=cfg.get("plausibility_mode"))
+            st.code(recipe, language=None)
             overrides = cfg.get("overrides", [])
             if overrides:
                 st.caption("Overrides applied:")
@@ -502,9 +538,9 @@ if pipelines_by_model:
                     mime="text/csv",
                     key=f"download_preview_{model_key}",
                 )
-    st.info("✅ Pipeline ready! Proceed to Train & Compare page.")
+    st.info("Pipeline ready. Proceed to Train & Compare page.")
 
-    if st.button("🔄 Rebuild Pipeline", key="preprocess_rebuild_button"):
+    if st.button("Rebuild Pipeline", key="preprocess_rebuild_button"):
         st.session_state.preprocessing_pipeline = None
         st.session_state.preprocessing_config = None
         st.session_state.preprocessing_pipelines_by_model = {}
@@ -512,12 +548,15 @@ if pipelines_by_model:
         st.rerun()
 
 # State Debug (Advanced)
-with st.expander("🔧 Advanced / State Debug", expanded=False):
+with st.expander("Advanced / State Debug", expanded=False):
     st.markdown("**Current State:**")
     st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
     st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
     st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
     st.write(f"• Preprocessing pipeline: {'Built' if st.session_state.get('preprocessing_pipeline') else 'Not built'}")
+    _lt = st.session_state.get("last_timings", {})
+    if _lt:
+        st.write("• Last timings (s):", ", ".join(f"{k}={v}s" for k, v in _lt.items()))
     preprocessing_config = st.session_state.get('preprocessing_config')
     if preprocessing_config:
         st.write(f"• Numeric imputation: {preprocessing_config.get('numeric_imputation', 'N/A')}")

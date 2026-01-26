@@ -5,6 +5,7 @@ Permutation importance, partial dependence, optional SHAP.
 import streamlit as st
 import numpy as np
 import pandas as pd
+import time
 import plotly.graph_objects as go
 import plotly.express as px
 from typing import Dict, List, Optional
@@ -19,19 +20,23 @@ from ml.estimator_utils import is_estimator_fitted
 from ml.model_registry import get_registry
 from sklearn.pipeline import Pipeline as SklearnPipeline
 
+@st.cache_resource
+def _get_registry_cached():
+    return get_registry()
+
 logger = logging.getLogger(__name__)
 
 init_session_state()
 
-st.set_page_config(page_title="Explainability", page_icon="🔍", layout="wide")
-st.title("🔍 Model Explainability")
+st.set_page_config(page_title="Explainability", page_icon=None, layout="wide")
+st.title("Model Explainability")
 
 # Progress indicator
 render_progress_indicator("05_Explainability")
 
 # Check prerequisites
 if not st.session_state.get('trained_models'):
-    st.warning("⚠️ Please train models first in the Train & Compare page")
+    st.warning("Please train models first in the Train & Compare page")
     st.info("**Next steps:** Go to Train & Compare page, prepare splits, and train at least one model.")
     st.stop()
 
@@ -42,16 +47,16 @@ y_test = st.session_state.get('y_test')
 feature_names = st.session_state.get('feature_names', [])
 
 if X_test is None or y_test is None:
-    st.warning("⚠️ Please prepare data splits first")
+    st.warning("Please prepare data splits first")
     st.info("**Next steps:** Go to Train & Compare page and click 'Prepare Splits'.")
     st.stop()
 
-# Get registry for capability checks
-registry = get_registry()
+# Get registry for capability checks (cached)
+registry = _get_registry_cached()
 
 # Interpretability coach guidance
 trained = list(st.session_state.get('trained_models', {}).keys())
-with st.expander("🎓 Interpretability Coach", expanded=False):
+with st.expander("Interpretability Coach", expanded=False):
     st.markdown(
         "**Interpretability by model:** Linear models (Ridge, Lasso, LogReg, GLM) and Huber regression offer "
         "**high** interpretability (coefficients, direct feature–outcome links). Tree-based models and "
@@ -68,8 +73,8 @@ with st.expander("🎓 Interpretability Coach", expanded=False):
     )
 
 # Permutation Importance
-st.header("🎯 Permutation Importance")
-with st.expander("📚 What is Permutation Importance?", expanded=False):
+st.header("Permutation Importance")
+with st.expander("What is Permutation Importance?", expanded=False):
     st.markdown("""
     **Definition:** Permutation importance measures how much model performance degrades when a feature's values are randomly shuffled.
     
@@ -84,6 +89,8 @@ with st.expander("📚 What is Permutation Importance?", expanded=False):
     - Non-linear interactions: may underestimate importance of features that work together
     - Extrapolation: if shuffled values are outside training range, predictions may be unreliable
     """)
+    from ml.plot_narrative import interpretation_permutation_importance
+    st.caption(f"**Interpreting these numbers:** {interpretation_permutation_importance()}")
 st.info("Available for all models with `predict` method.")
 
 if st.button("Calculate Permutation Importance", key="explain_perm_importance_button"):
@@ -113,7 +120,7 @@ if st.button("Calculate Permutation Importance", key="explain_perm_importance_bu
                     ('model', estimator)
                 ])
                 # Get raw test data for explainability
-                df_raw = st.session_state.get('raw_data')
+                df_raw = get_data()
                 test_indices = st.session_state.get('test_indices')
                 if df_raw is not None and data_config and test_indices is not None:
                     try:
@@ -159,14 +166,14 @@ if st.button("Calculate Permutation Importance", key="explain_perm_importance_bu
             logger.exception(f"Error calculating permutation importance for {name}: {e}")
     
     if perm_errors:
-        with st.expander("⚠️ Permutation Importance Errors (click to view)", expanded=False):
+        with st.expander("Permutation Importance Errors (click to view)", expanded=False):
             for err in perm_errors:
                 st.text(err)
     
     if any(st.session_state.get('permutation_importance', {}).values()):
-        st.success("✅ Permutation importance calculated!")
+        st.success("Permutation importance calculated!")
     else:
-        st.warning("⚠️ Could not calculate permutation importance for any models. Check errors above.")
+        st.warning("Could not calculate permutation importance for any models. Check errors above.")
 
 # Display permutation importance
 if st.session_state.get('permutation_importance'):
@@ -178,7 +185,7 @@ if st.session_state.get('permutation_importance'):
         _is = perm_data.get('importances_std', [])
         n = min(len(_fn), len(_im), len(_is))
         if n == 0:
-            st.warning(f"⚠️ Skipping {name.upper()}: permutation importance data has empty arrays.")
+            st.warning(f"Skipping {name.upper()}: permutation importance data has empty arrays.")
             continue
         fn_slice = _fn[:n]
         im_slice = np.asarray(_im)[:n]
@@ -222,13 +229,15 @@ if st.session_state.get('permutation_importance'):
         )
 
 # Cross-Model Robustness
-st.header("🔄 Cross-Model Robustness")
-with st.expander("📚 What is Cross-Model Robustness?", expanded=False):
+st.header("Cross-Model Robustness")
+with st.expander("What is Cross-Model Robustness?", expanded=False):
     st.markdown(
         "Compare permutation importance **rankings** across models. When models agree on which features "
         "matter (high rank correlation, overlapping top features), explanations are more **robust**. "
         "Large disagreement may indicate instability or model-specific artifacts."
     )
+    from ml.plot_narrative import interpretation_robustness
+    st.caption(f"**Interpreting these numbers:** {interpretation_robustness()}")
 perm_names = list(st.session_state.get('permutation_importance', {}).keys())
 if len(perm_names) >= 2:
     if st.button("Run Robustness Check", key="explain_robustness_button"):
@@ -272,8 +281,8 @@ else:
     st.info("Compute permutation importance for at least 2 models to run robustness checks.")
 
 # Partial Dependence
-st.header("📈 Partial Dependence Plots")
-with st.expander("📚 What is Partial Dependence?", expanded=False):
+st.header("Partial Dependence Plots")
+with st.expander("What is Partial Dependence?", expanded=False):
     st.markdown("""
     **Definition:** Partial dependence shows how a feature affects predictions, averaged over all other features.
     
@@ -288,6 +297,8 @@ with st.expander("📚 What is Partial Dependence?", expanded=False):
     - Correlated features: assumes independence, may not reflect real-world interactions
     - Only shows average effect, not individual variation
     """)
+    from ml.plot_narrative import interpretation_partial_dependence
+    st.caption(f"**Interpreting these numbers:** {interpretation_partial_dependence()}")
 st.info("Available for models with `predict` or `predict_proba` methods.")
 
 if st.button("Calculate Partial Dependence"):
@@ -327,7 +338,7 @@ if st.button("Calculate Partial Dependence"):
                     ('model', estimator)
                 ])
                 # Get raw test data for explainability
-                df_raw = st.session_state.get('raw_data')
+                df_raw = get_data()
                 test_indices = st.session_state.get('test_indices')
                 if df_raw is not None and data_config and test_indices is not None:
                     try:
@@ -398,13 +409,13 @@ if st.button("Calculate Partial Dependence"):
     if nn_skipped:
         st.info("Partial dependence is not supported for neural networks. Use SHAP or permutation importance for model explainability.")
     if pd_errors:
-        with st.expander("⚠️ Partial Dependence Errors (click to view)", expanded=False):
+        with st.expander("Partial Dependence Errors (click to view)", expanded=False):
             for err in pd_errors:
                 st.text(err)
     if any(st.session_state.get("partial_dependence", {}).values()):
-        st.success("✅ Partial dependence calculated!")
+        st.success("Partial dependence calculated!")
     elif not nn_skipped and not pd_errors:
-        st.warning("⚠️ Could not calculate partial dependence for any features.")
+        st.warning("Could not calculate partial dependence for any features.")
 
 # Display partial dependence
 if st.session_state.get('partial_dependence'):
@@ -437,15 +448,29 @@ if st.session_state.get('partial_dependence'):
                     )
                     st.plotly_chart(fig, use_container_width=True, key=f"pd_plot_{name}_{feat_name}")
                 except Exception as e:
-                    st.warning(f"Error plotting PD for {feat_name}: {str(e)}")
+                    st.warning(f"Error plotting PD for {feat_name}: {e}")
         
         from ml.plot_narrative import narrative_partial_dependence
         from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
         nar = narrative_partial_dependence(pd_data, model_name=name)
         if nar:
             st.markdown(f"**Interpretation:** {nar}")
-        feats = list(pd_data.keys())[:5]
-        stats_summary = "; ".join(feats) if feats else ""
+        feats = list(pd_data.keys())
+        pd_parts = []
+        for f in feats:
+            pv = pd_data.get(f, {})
+            v = pv.get("values")
+            a = pv.get("average")
+            if v is not None and a is not None:
+                v_arr = np.asarray(v).ravel()
+                a_arr = np.asarray(a).ravel()
+                v_min, v_max = float(np.nanmin(v_arr)), float(np.nanmax(v_arr))
+                a_min, a_max = float(np.nanmin(a_arr)), float(np.nanmax(a_arr))
+                a_mean = float(np.nanmean(a_arr))
+                pd_parts.append(f"{f}: value range [{v_min:.3g}, {v_max:.3g}], PD avg min={a_min:.4f} max={a_max:.4f} mean={a_mean:.4f}")
+            else:
+                pd_parts.append(f"{f}: (no data)")
+        stats_summary = "; ".join(pd_parts) if pd_parts else "; ".join(feats) if feats else ""
         ctx = build_llm_context(
             "partial_dependence", stats_summary, model_name=name, existing=nar or "",
             feature_names=feats, task_type=data_config.task_type if data_config else None,
@@ -456,8 +481,8 @@ if st.session_state.get('partial_dependence'):
         )
 
 # SHAP (Advanced)
-st.header("🔬 SHAP Analysis (Advanced)")
-with st.expander("📚 What is SHAP?", expanded=False):
+st.header("SHAP Analysis (Advanced)")
+with st.expander("What is SHAP?", expanded=False):
     st.markdown("""
     **Definition:** SHAP (SHapley Additive exPlanations) provides feature-level explanations based on game theory.
     
@@ -476,6 +501,8 @@ with st.expander("📚 What is SHAP?", expanded=False):
     - Assumes feature independence (like permutation importance)
     - Values depend on background data distribution
     """)
+    from ml.plot_narrative import interpretation_shap
+    st.caption(f"**Interpreting these numbers:** {interpretation_shap()}")
 st.info("Availability depends on model type: TreeExplainer for tree models, LinearExplainer for linear models, KernelExplainer for others (slower).")
 
 use_shap = st.checkbox(
@@ -490,20 +517,34 @@ if use_shap:
         import matplotlib.pyplot as plt
 
         class _ShapPredictWrapper:
-            """Thin wrapper so SHAP can set feature_names_in_ without touching the pipeline."""
+            """Thin wrapper so SHAP can set feature_names_in_ without touching the pipeline.
+            When feature_cols is set, converts numpy X to DataFrame for pipelines with ColumnTransformer."""
             feature_names_in_ = None
 
-            def __init__(self, model):
+            def __init__(self, model, feature_cols: Optional[List[str]] = None):
                 self._model = model
+                self._feature_cols = feature_cols
+
+            def _ensure_df(self, X):
+                if self._feature_cols is None:
+                    return X
+                if isinstance(X, pd.DataFrame):
+                    return X
+                arr = np.asarray(X, dtype=float)
+                n = min(arr.shape[1], len(self._feature_cols))
+                cols = self._feature_cols[:n]
+                return pd.DataFrame(arr[:, :n], columns=cols)
 
             def predict(self, X):
-                return self._model.predict(X)
+                X_df = self._ensure_df(X)
+                return self._model.predict(X_df)
 
             def predict_proba(self, X):
-                return self._model.predict_proba(X)
+                X_df = self._ensure_df(X)
+                return self._model.predict_proba(X_df)
 
         # SHAP configuration
-        with st.expander("⚙️ SHAP Configuration", expanded=False):
+        with st.expander("SHAP Configuration", expanded=False):
             background_size = st.slider(
                 "Background Sample Size",
                 min_value=50,
@@ -529,22 +570,23 @@ if use_shap:
             if spec:
                 support = spec.capabilities.supports_shap
                 support_label = {
-                    'tree': '🟢 Fast (TreeExplainer)',
-                    'linear': '🟢 Fast (LinearExplainer)',
-                    'kernel': '🟡 Slow (KernelExplainer)',
-                    'none': '🔴 Not supported'
-                }.get(support, '⚪ Unknown')
+                    'tree': 'Fast (TreeExplainer)',
+                    'linear': 'Fast (LinearExplainer)',
+                    'kernel': 'Slow (KernelExplainer)',
+                    'none': 'Not supported'
+                }.get(support, 'Unknown')
                 shap_support_info.append(f"• **{name.upper()}**: {support_label}")
         st.markdown("\n".join(shap_support_info))
         
         # Run SHAP button
-        run_shap = st.button("🚀 Run SHAP Analysis", type="primary", key="run_shap_button")
+        run_shap = st.button("Run SHAP Analysis", type="primary", key="run_shap_button")
         if "shap_results" not in st.session_state:
             st.session_state.shap_results = {}
 
         if not run_shap and not st.session_state.get("shap_results"):
-            st.info("👆 Click the button above to compute SHAP values. This may take a while depending on your data and model types.")
+            st.info("Click the button above to compute SHAP values. This may take a while depending on your data and model types.")
         elif run_shap:
+            t0 = time.perf_counter()
             for name, model_wrapper in st.session_state.trained_models.items():
                 st.subheader(f"{name.upper()} - SHAP Values")
             
@@ -553,14 +595,14 @@ if use_shap:
                 if spec:
                     shap_support = spec.capabilities.supports_shap
                     if shap_support == 'none':
-                        st.warning(f"⚠️ {name.upper()}: SHAP not supported for this model type.")
+                        st.warning(f"{name.upper()}: SHAP not supported for this model type.")
                         continue
                     elif shap_support == 'kernel':
-                        st.info(f"ℹ️ {name.upper()}: Using KernelExplainer (may be slow)")
+                        st.info(f"{name.upper()}: Using KernelExplainer (may be slow)")
             
                 # Get the fitted sklearn-compatible estimator from session_state
                 if name not in st.session_state.get('fitted_estimators', {}):
-                    st.warning(f"⚠️ {name.upper()} fitted estimator not found. Please retrain the model.")
+                    st.warning(f"{name.upper()} fitted estimator not found. Please retrain the model.")
                     continue
             
                 # Use the stored fitted estimator (not creating a new instance)
@@ -568,7 +610,7 @@ if use_shap:
             
                 # Verify it's fitted (works for both sklearn models and custom wrappers)
                 if not is_estimator_fitted(estimator):
-                    st.warning(f"⚠️ {name.upper()} estimator not marked as fitted. Skipping SHAP.")
+                    st.warning(f"{name.upper()} estimator not marked as fitted. Skipping SHAP.")
                     continue
             
                 # Create full pipeline if preprocessing exists
@@ -579,7 +621,7 @@ if use_shap:
                         ('model', estimator)
                     ])
                     # Get raw test data for explainability
-                    df_raw = st.session_state.get('raw_data')
+                    df_raw = get_data()
                     test_indices = st.session_state.get('test_indices')
                     if df_raw is not None and data_config and test_indices is not None:
                         try:
@@ -647,7 +689,9 @@ if use_shap:
                         progress_bar.progress(0.8)
                     else:
                         task_type = data_config.task_type if data_config else 'regression'
-                        _kernel_model = _ShapPredictWrapper(full_pipeline)
+                        has_preprocess = isinstance(full_pipeline, SklearnPipeline) and 'preprocess' in getattr(full_pipeline, 'named_steps', {})
+                        fc = list(data_config.feature_cols) if (data_config and has_preprocess) else None
+                        _kernel_model = _ShapPredictWrapper(full_pipeline, feature_cols=fc)
                         if task_type == 'classification' and hasattr(full_pipeline, 'predict_proba'):
                             status_text.text("Preparing background data for KernelExplainer...")
                             progress_bar.progress(0.3)
@@ -756,15 +800,17 @@ if use_shap:
                         ctx, key=f"llm_shap_{name}", result_session_key=f"llm_result_shap_{name}",
                     )
                     progress_bar.progress(1.0)
-                    status_text.text("✅ SHAP analysis complete!")
+                    status_text.text("SHAP analysis complete!")
                     progress_bar.empty()
                     status_text.empty()
                 
                 except Exception as e:
-                    st.error(f"❌ Error calculating SHAP for {name}: {str(e)}")
+                    st.error(f"Error calculating SHAP for {name}: {e}")
                     with st.expander("Error details", expanded=False):
                         st.text(str(e))
                         logger.exception(e)
+            elapsed = time.perf_counter() - t0
+            st.session_state.setdefault("last_timings", {})["Run SHAP"] = round(elapsed, 2)
         elif st.session_state.get("shap_results"):
             for name, s in st.session_state.shap_results.items():
                 st.subheader(f"{name.upper()} - SHAP Values")
@@ -798,19 +844,21 @@ if use_shap:
                     st.warning(f"Could not redraw SHAP for {name}: {e}")
             
     except ImportError:
-        st.warning("⚠️ SHAP not installed. Install with: `pip install shap`")
+        st.warning("SHAP not installed. Install with: `pip install shap`")
     except Exception as e:
-        st.error(f"❌ Error setting up SHAP: {str(e)}")
+        st.error(f"Error setting up SHAP: {e}")
         logger.exception(e)
 
 # Bland–Altman (regression only)
-st.header("📐 Bland–Altman Plot")
-with st.expander("📚 What is a Bland–Altman Plot?", expanded=False):
+st.header("Bland–Altman Plot")
+with st.expander("What is a Bland–Altman Plot?", expanded=False):
     st.markdown(
         "Compares **agreement** between two measurement methods (e.g. two models' predictions). "
         "X-axis: mean of the two; Y-axis: difference. Lines show mean difference and limits of agreement (mean ± 1.96 SD). "
         "Useful to see systematic bias and spread of disagreement between models."
     )
+    from ml.plot_narrative import interpretation_bland_altman
+    st.caption(f"**Interpreting these numbers:** {interpretation_bland_altman()}")
 mr = st.session_state.get('model_results', {})
 task_det = st.session_state.get('task_type_detection')
 task_final = (task_det.final if task_det and task_det.final else None) or (data_config.task_type if data_config else None)
@@ -849,7 +897,7 @@ else:
     st.info("Bland–Altman is available for **regression** tasks with at least two trained models.")
 
 # State Debug (Advanced)
-with st.expander("🔧 Advanced / State Debug", expanded=False):
+with st.expander("Advanced / State Debug", expanded=False):
     st.markdown("**Current State:**")
     _df = get_data()  # Get data from session state
     st.write(f"• Data shape: {_df.shape if _df is not None else 'None'}")
@@ -863,3 +911,6 @@ with st.expander("🔧 Advanced / State Debug", expanded=False):
     st.write(f"• Trained models: {len(st.session_state.get('trained_models', {}))}")
     st.write(f"• Permutation importance: {len(st.session_state.get('permutation_importance', {}))}")
     st.write(f"• Partial dependence: {len(st.session_state.get('partial_dependence', {}))}")
+    _lt = st.session_state.get("last_timings", {})
+    if _lt:
+        st.write("• Last timings (s):", ", ".join(f"{k}={v}s" for k, v in _lt.items()))

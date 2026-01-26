@@ -1,10 +1,10 @@
-# 🧪 Modeling Lab
+# Modeling Lab
 
 A comprehensive, educational machine learning modeling platform built with Streamlit. Upload your data, explore it, build preprocessing pipelines, train multiple models, understand their behavior, and export detailed reports—all with consistent preprocessing and honest evaluation.
 
 Optionally use a local LLM ([Ollama](https://ollama.ai)) to generate human-readable interpretations of EDA, model diagnostics, and explainability results.
 
-## 📋 Table of Contents
+## Table of Contents
 
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -14,7 +14,7 @@ Optionally use a local LLM ([Ollama](https://ollama.ai)) to generate human-reada
 - [Known Limitations](#known-limitations)
 - [Troubleshooting](#troubleshooting)
 
-## 🚀 Installation
+## Installation
 
 ### Prerequisites
 
@@ -64,7 +64,7 @@ uv run streamlit run app.py
 
 The app will open in your browser at `http://localhost:8501`
 
-## ⚡ Quick Start
+## Quick Start
 
 1. **Upload Data**: Use the sidebar or Upload page to upload a CSV file
 2. **Select Target & Features**: Choose what to predict and which columns to use
@@ -74,11 +74,11 @@ The app will open in your browser at `http://localhost:8501`
 6. **Explain**: Understand model behavior with feature importance. Optional: use **Interpret these results using an LLM** to get AI-generated interpretations where available.
 7. **Export**: Download comprehensive reports
 
-## 🎯 Happy Path Walkthrough
+## Happy Path Walkthrough
 
 ### Step 1: Upload & Audit (Page 01)
 
-1. Navigate to **📁 Upload & Audit** page
+1. Navigate to **Upload & Audit** page
 2. Click "Upload CSV file" and select your dataset
 3. Review the data audit:
    - Missing values summary
@@ -95,7 +95,7 @@ The app will open in your browser at `http://localhost:8501`
 
 ### Step 2: Exploratory Data Analysis (Page 02)
 
-1. Navigate to **📊 EDA** page
+1. Navigate to **EDA** page
 2. Review summary statistics
 3. Examine target distribution (histogram and box plot)
 4. For classification: check class balance
@@ -106,7 +106,7 @@ The app will open in your browser at `http://localhost:8501`
 
 ### Step 3: Preprocessing (Page 03)
 
-1. Navigate to **⚙️ Preprocess** page
+1. Navigate to **Preprocess** page
 2. Configure numeric preprocessing:
    - Imputation strategy (mean/median/constant)
    - Scaling (standard/robust/none)
@@ -122,7 +122,7 @@ The app will open in your browser at `http://localhost:8501`
 
 ### Step 4: Train & Compare (Page 04)
 
-1. Navigate to **🏋️ Train & Compare** page
+1. Navigate to **Train & Compare** page
 2. Configure data splits:
    - Set train/val/test percentages (must sum to 100%)
    - Optionally enable cross-validation
@@ -144,7 +144,7 @@ The app will open in your browser at `http://localhost:8501`
 
 ### Step 5: Explainability (Page 05)
 
-1. Navigate to **🔍 Explainability** page
+1. Navigate to **Explainability** page
 2. Click **"Calculate Permutation Importance"**
 3. Review feature importance rankings and plots
 4. Click **"Calculate Partial Dependence"**
@@ -156,7 +156,7 @@ The app will open in your browser at `http://localhost:8501`
 
 ### Step 6: Report Export (Page 06)
 
-1. Navigate to **📄 Report Export** page
+1. Navigate to **Report Export** page
 2. Review the generated markdown report
 3. Click **"Download Report (Markdown)"** or **"Download Complete Package (ZIP)"**
 4. ZIP includes:
@@ -166,7 +166,7 @@ The app will open in your browser at `http://localhost:8501`
 
 **Expected Output**: Comprehensive report downloaded
 
-## ✨ Features
+## Features
 
 ### Multi-Page Structure
 - **6 dedicated pages** for focused workflows
@@ -225,7 +225,7 @@ The app will open in your browser at `http://localhost:8501`
 - Includes: dataset summary, audit, splits, preprocessing, hyperparameters, metrics, feature importance
 - Download as markdown or ZIP (with CSV exports)
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 glucose-mlp-interactive/
@@ -270,7 +270,7 @@ See repo for full layout.
 - **Code quality**: Type hints, docstrings, error handling. Optional dependencies (SHAP, LLM via Ollama) degrade gracefully when unavailable. `scripts/smoke_check.py` validates imports and core behavior.
 - **Educational Focus**: Clear explanations and visualizations
 
-## ⚠️ Known Limitations & Assumptions
+## Known Limitations & Assumptions
 
 ### Data Assumptions
 - **CSV format**: Only CSV files are supported
@@ -304,7 +304,7 @@ See repo for full layout.
 - Tested on Chrome, Firefox, Edge
 - Some features may not work on older browsers
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### "streamlit: command not found"
 - **Solution**: Make sure virtual environment is activated
@@ -343,7 +343,7 @@ See repo for full layout.
 - **Solution**: Check browser console (F12) for JavaScript errors
 - **Solution**: Ensure you've completed prerequisite steps (e.g., upload data before EDA)
 
-## 📚 Additional Resources
+## Additional Resources
 
 - [Quick Start Guide](QUICKSTART.md) - Detailed setup instructions and troubleshooting
 - [Deployment Guide](DEPLOYMENT.md) - Deployment options

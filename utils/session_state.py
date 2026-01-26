@@ -165,13 +165,14 @@ def init_session_state():
 
 
 def get_data() -> Optional[pd.DataFrame]:
-    """Get raw data from session state."""
-    return st.session_state.get('raw_data')
+    """Get active data from session state. Uses filtered_data when plausibility filter mode was used, else raw_data."""
+    return st.session_state.get('filtered_data') or st.session_state.get('raw_data')
 
 
 def set_data(df: pd.DataFrame):
-    """Set raw data in session state."""
+    """Set raw data in session state. Clears filtered_data so it is not stale."""
     st.session_state.raw_data = df
+    st.session_state.pop("filtered_data", None)
 
 
 def reset_data_dependent_state():
@@ -185,6 +186,7 @@ def reset_data_dependent_state():
     st.session_state.preprocessing_config = None
     st.session_state.preprocessing_pipelines_by_model = {}
     st.session_state.preprocessing_config_by_model = {}
+    st.session_state.pop("filtered_data", None)
 
     st.session_state.X_train = None
     st.session_state.X_val = None
@@ -210,6 +212,9 @@ def reset_data_dependent_state():
     st.session_state.eda_results = {}
     st.session_state.eda_insights = []
     st.session_state.report_data = None
+    st.session_state.pop("target_label_encoder", None)
+    st.session_state.pop("train_indices", None)
+    st.session_state.pop("test_indices", None)
 
 
 def get_preprocessing_pipeline(model_key: Optional[str] = None) -> Optional[Pipeline]:

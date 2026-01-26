@@ -738,7 +738,7 @@ def get_profile_summary_text(profile: DatasetProfile) -> str:
         else:
             lines.append(f"\n**Target ({tp.name}):** Categorical ({tp.n_classes} classes)")
             if tp.is_imbalanced:
-                lines.append(f"- ⚠️ Imbalanced: {tp.imbalance_severity} ({tp.class_balance_ratio:.1f}:1 ratio)")
+                lines.append(f"- Imbalanced: {tp.imbalance_severity} ({tp.class_balance_ratio:.1f}:1 ratio)")
     
     # Warnings summary
     if profile.warnings:

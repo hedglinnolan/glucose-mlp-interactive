@@ -29,20 +29,20 @@ from ml.plot_narrative import (
 
 init_session_state()
 
-st.set_page_config(page_title="EDA", page_icon="📊", layout="wide")
-st.title("📊 Exploratory Data Analysis")
+st.set_page_config(page_title="EDA", page_icon=None, layout="wide")
+st.title("Exploratory Data Analysis")
 
 # Progress indicator
 render_progress_indicator("02_EDA")
 
 df = get_data()
 if df is None:
-    st.warning("⚠️ Please upload data in the Upload & Audit page first")
+    st.warning("Please upload data in the Upload & Audit page first")
     st.stop()
 
 data_config: Optional[DataConfig] = st.session_state.get('data_config')
 if data_config is None or not data_config.target_col:
-    st.warning("⚠️ Please select target and features in the Upload & Audit page first")
+    st.warning("Please select target and features in the Upload & Audit page first")
     st.stop()
 
 target_col = data_config.target_col
@@ -57,7 +57,7 @@ cohort_type_final = cohort_structure_detection.final if cohort_structure_detecti
 entity_id_final = cohort_structure_detection.entity_id_final
 
 # EDA settings
-with st.expander("⚙️ EDA Settings", expanded=False):
+with st.expander("EDA Settings", expanded=False):
     outlier_method = st.selectbox(
         "Outlier detection method",
         ["iqr", "mad", "zscore", "percentile"],
@@ -102,17 +102,10 @@ with col3:
 with col4:
     st.metric("Categorical", f"{profile.n_categorical}")
 with col5:
-    sufficiency_emoji = {
-        "abundant": "🟢",
-        "adequate": "🟡", 
-        "limited": "🟠",
-        "scarce": "🔴",
-        "critical": "⛔"
-    }.get(profile.data_sufficiency.value, "⚪")
-    st.metric("Data Sufficiency", f"{sufficiency_emoji} {profile.data_sufficiency.value.title()}")
+    st.metric("Data Sufficiency", profile.data_sufficiency.value.title())
 
 # Data sufficiency narrative
-with st.expander("📊 Data Sufficiency Analysis", expanded=True):
+with st.expander("Data Sufficiency Analysis", expanded=True):
     st.markdown(f"**{profile.sufficiency_narrative}**")
     
     # Show feature-to-sample ratio context
@@ -130,7 +123,7 @@ with st.expander("📊 Data Sufficiency Analysis", expanded=True):
 
 # Warnings panel
 if profile.warnings:
-    st.markdown("### ⚠️ Data Warnings")
+    st.markdown("### Data Warnings")
     
     # Group warnings by severity
     critical = [w for w in profile.warnings if w.level.value == 'critical']
@@ -153,7 +146,7 @@ if profile.warnings:
                     st.markdown(f"• {action}")
     
     if cautions:
-        with st.expander(f"ℹ️ {len(cautions)} additional caution(s)"):
+        with st.expander(f"{len(cautions)} additional caution(s)"):
             for w in cautions:
                 st.info(f"**{w.short_message}:** {w.detailed_message}")
 
@@ -178,13 +171,13 @@ signals = compute_signals_cached(
 st.markdown("---")
 insights = get_insights_by_category()
 if insights:
-    with st.expander("💡 Key Insights So Far", expanded=False):
+    with st.expander("Key Insights So Far", expanded=False):
         st.markdown("**Insights collected from EDA analyses:**")
         for insight in insights:
             st.markdown(f"**{insight.get('category', 'General').title()}:** {insight['finding']}")
             st.caption(f"→ Implication: {insight['implication']}")
 else:
-    st.info("💡 Run EDA analyses below to collect insights that will guide model selection and preprocessing.")
+    st.info("Run EDA analyses below to collect insights that will guide model selection and preprocessing.")
 
 # ============================================================================
 # EDA: UPFRONT (non–model-specific)
@@ -192,13 +185,13 @@ else:
 if 'eda_results' not in st.session_state:
     st.session_state.eda_results = {}
 
-st.header("🔬 Non–Model-Specific EDA")
+st.header("Non–Model-Specific EDA")
 st.caption("Run these first. Plausibility and collinearity inform model choice and preprocessing.")
 
 def _run_and_show(action_id: str, title: str, run_action: str):
-    from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
+    from utils.llm_ui import build_llm_context, build_eda_full_results_context, render_interpretation_with_llm_button
     key_run = f"upfront_run_{action_id}"
-    if st.button(f"▶️ Run {title}", key=key_run, type="primary"):
+    if st.button(f"Run {title}", key=key_run, type="primary"):
         try:
             action_func = getattr(eda_actions, run_action, None)
             if action_func:
@@ -223,7 +216,7 @@ def _run_and_show(action_id: str, title: str, run_action: str):
                 st.dataframe(fig_data, use_container_width=True, key=f"upfront_table_{action_id}_{idx}")
         if interp:
             st.markdown(f"**Interpretation:** {interp}")
-            stats_summary = "; ".join(result.get('findings', [])[:3])
+            stats_summary = build_eda_full_results_context(result, action_id)
             ctx = build_llm_context(action_id, stats_summary, existing=interp, feature_names=feature_cols, sample_size=len(df) if df is not None else None, task_type=task_type_final if task_type_final else None)
             render_interpretation_with_llm_button(
                 ctx, key=f"llm_upfront_{action_id}", result_session_key=f"llm_result_upfront_{action_id}",
@@ -282,7 +275,7 @@ ACTION_NARRATIVE = {
     "feature_scaling_check": narrative_eda_scaling,
 }
 
-st.header("🔍 Model-Family–Specific EDA")
+st.header("Model-Family–Specific EDA")
 st.caption("Run all analyses for a family, or run individual tasks. Results include a short “What am I looking at” narrative.")
 
 for family, tasks in FAMILY_TASKS.items():
@@ -294,7 +287,7 @@ for family, tasks in FAMILY_TASKS.items():
             st.caption("No runnable actions for this family.")
             continue
         run_all_key = f"run_all_{family.replace(' ', '_')}"
-        if st.button("▶️ Run All", key=run_all_key, type="primary"):
+        if st.button("Run All", key=run_all_key, type="primary"):
             for _desc, act in run_list:
                 try:
                     action_func = getattr(eda_actions, act, None)
@@ -331,8 +324,8 @@ for family, tasks in FAMILY_TASKS.items():
             elif findings and result.get("figures"):
                 st.markdown(f"**Interpretation:** {'; '.join(findings[:2])}")
             if (interp or findings) and result.get("figures"):
-                from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
-                stats_summary = "; ".join(findings[:3]) if findings else (interp or "")
+                from utils.llm_ui import build_llm_context, build_eda_full_results_context, render_interpretation_with_llm_button
+                stats_summary = build_eda_full_results_context(result, act)
                 ctx = build_llm_context(act, stats_summary, existing=interp or "; ".join(findings[:2]) if findings else "", feature_names=feature_cols, sample_size=len(df) if df is not None else None, task_type=task_type_final or None)
                 render_interpretation_with_llm_button(
                     ctx, key=f"llm_family_{family}_{act}", result_session_key=f"llm_result_family_{family}_{act}",
@@ -352,10 +345,10 @@ OTHER_ACTIONS = [a for a in [
     "missingness_scan", "cohort_split_guidance", "leakage_scan", "quick_probe_baselines"
 ] if a not in upfront_and_family and getattr(eda_actions, a, None) is not None]
 
-st.header("🔧 Other Advanced Analyses")
+st.header("Other Advanced Analyses")
 if OTHER_ACTIONS:
     other_select = st.selectbox("Select analysis to run", OTHER_ACTIONS, key="eda_other_select")
-    if st.button("▶️ Run Selected", key="eda_other_run"):
+    if st.button("Run Selected", key="eda_other_run"):
         try:
             action_func = getattr(eda_actions, other_select, None)
             if action_func:
@@ -379,8 +372,8 @@ if OTHER_ACTIONS:
                 st.dataframe(fig_data, use_container_width=True, key=f"other_table_{other_select}_{idx}")
         if interp:
             st.markdown(f"**Interpretation:** {interp}")
-            from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
-            stats_summary = "; ".join(result.get('findings', [])[:3])
+            from utils.llm_ui import build_llm_context, build_eda_full_results_context, render_interpretation_with_llm_button
+            stats_summary = build_eda_full_results_context(result, other_select)
             ctx = build_llm_context(other_select, stats_summary, existing=interp, feature_names=feature_cols, sample_size=len(df) if df is not None else None, task_type=task_type_final or None)
             render_interpretation_with_llm_button(
                 ctx, key=f"llm_other_{other_select}", result_session_key=f"llm_result_other_{other_select}",
@@ -393,7 +386,7 @@ st.markdown("---")
 # ============================================================================
 # DATASET SIGNALS EXPLAINER
 # ============================================================================
-with st.expander("📊 Dataset Signals Detail"):
+with st.expander("Dataset Signals Detail"):
     st.markdown("**Dataset Summary:**")
     st.write(f"• Rows: {signals.n_rows:,}")
     st.write(f"• Columns: {signals.n_cols}")
@@ -425,14 +418,14 @@ st.markdown("---")
 # ============================================================================
 # STANDARD EDA VIEWS
 # ============================================================================
-st.header("📈 Standard EDA Views")
+st.header("Standard EDA Views")
 
 # Summary statistics
-st.subheader("📈 Summary Statistics")
+st.subheader("Summary Statistics")
 st.dataframe(df[feature_cols + [target_col]].describe(), use_container_width=True)
 
 # Distribution plots
-st.subheader("📊 Distributions")
+st.subheader("Distributions")
 
 # Target distribution
 st.markdown(f"**Target Distribution: {target_col}**")
@@ -470,7 +463,7 @@ for i in range(0, n_features_show, cols_per_row):
                 st.plotly_chart(fig, use_container_width=True)
 
 # Target vs feature plots (collinearity heatmap is upfront)
-st.header("🎯 Target vs Features")
+st.header("Target vs Features")
 
 # Regression: scatter plots
 if task_type_final == 'regression':
@@ -500,4 +493,4 @@ else:
                     fig = px.box(df, x=target_col, y=feat, title=f"{feat} by {target_col}")
                     st.plotly_chart(fig, use_container_width=True)
 
-st.success("✅ EDA complete. Proceed to Preprocessing page.")
+st.success("EDA complete. Proceed to Preprocessing page.")

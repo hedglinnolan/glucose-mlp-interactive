@@ -7,14 +7,14 @@ import streamlit as st
 # Page config
 st.set_page_config(
     page_title="Modeling Lab",
-    page_icon="🧪",
+    page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Learning Checklist Sidebar
+# Learning Checklist Sidebar (plain text; storyline progress indicator on pages keeps emojis)
 with st.sidebar:
-    st.header("📋 Learning Checklist")
+    st.header("Learning Checklist")
     
     # Check completion status
     data_uploaded = st.session_state.get('df') is not None
@@ -26,17 +26,17 @@ with st.sidebar:
     report_generated = st.session_state.get('report_data') is not None
     
     checklist_items = [
-        ("📁 Upload Data", data_uploaded),
-        ("🔍 Review Audit", audit_complete),
-        ("📊 Explore EDA", data_configured),  # EDA can be viewed once data is configured
-        ("⚙️ Build Pipeline", pipeline_built),
-        ("🏋️ Train Models", models_trained),
-        ("🔍 Run Explainability", explainability_run),
-        ("📄 Export Report", report_generated)
+        ("Upload Data", data_uploaded),
+        ("Review Audit", audit_complete),
+        ("Explore EDA", data_configured),
+        ("Build Pipeline", pipeline_built),
+        ("Train Models", models_trained),
+        ("Run Explainability", explainability_run),
+        ("Export Report", report_generated)
     ]
     
     for item, completed in checklist_items:
-        status = "✅" if completed else "⏳"
+        status = "[x]" if completed else "[ ]"
         st.markdown(f"{status} {item}")
     
     st.divider()
@@ -48,7 +48,7 @@ with st.sidebar:
     st.caption(f"Progress: {completed_count}/{len(checklist_items)} steps complete")
 
 # Main page (home)
-st.title("🧪 Modeling Lab")
+st.title("Modeling Lab")
 st.markdown("""
 Welcome to the **Modeling Lab** - An educational platform for machine learning experimentation.
 
@@ -56,12 +56,12 @@ Welcome to the **Modeling Lab** - An educational platform for machine learning e
 
 Navigate through the pages using the sidebar:
 
-1. **📁 Upload & Audit** - Upload your dataset and perform data quality checks
-2. **📊 EDA** - Explore your data with visualizations and statistics
-3. **⚙️ Preprocess** - Build preprocessing pipelines for your features
-4. **🏋️ Train & Compare** - Train multiple models and compare performance
-5. **🔍 Explainability** - Understand model predictions with feature importance
-6. **📄 Report Export** - Generate comprehensive modeling reports
+1. **Upload & Audit** - Upload your dataset and perform data quality checks
+2. **EDA** - Explore your data with visualizations and statistics
+3. **Preprocess** - Build preprocessing pipelines for your features
+4. **Train & Compare** - Train multiple models and compare performance
+5. **Explainability** - Understand model predictions with feature importance
+6. **Report Export** - Generate comprehensive modeling reports
 
 ### Features
 
@@ -87,7 +87,7 @@ Navigate through the pages using the sidebar:
 """)
 
 # Sidebar navigation info
-st.sidebar.title("🧪 Modeling Lab")
+st.sidebar.title("Modeling Lab")
 st.sidebar.markdown("""
 ### Navigation
 

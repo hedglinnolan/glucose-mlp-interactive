@@ -2,46 +2,52 @@
 Helper functions to reconcile target/features selections without resetting everything.
 """
 import pandas as pd
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 
 
 def reconcile_target_features(
     df: pd.DataFrame,
     target: Optional[str],
     features: List[str],
-    numeric_cols: List[str]
+    selectable_cols: Union[List[str], Tuple[List[str], List[str]]],
 ) -> Tuple[Optional[str], List[str]]:
     """
     Reconcile target and feature selections, removing invalid choices.
-    
+
     Rules:
     - Target cannot be in features
-    - Features must exist in numeric_cols
+    - Features must exist in selectable pool (numeric + categorical) and df.columns
     - If target changes, remove it from features
     - Preserve valid features
-    
+
     Args:
         df: DataFrame
         target: Current target selection (can be None or '')
         features: Current feature selections
-        numeric_cols: List of numeric column names
-        
+        selectable_cols: Either a flat list of selectable column names, or
+            (numeric_cols, categorical_cols) from get_selectable_columns.
+
     Returns:
         Tuple of (reconciled_target, reconciled_features)
     """
-    # Normalize target (empty string -> None)
-    if target == '':
+    if target == "":
         target = None
-    
-    # Filter features to only numeric columns that exist
-    valid_features = [f for f in features if f in numeric_cols and f in df.columns]
-    
-    # Remove target from features if it's selected
+
+    if isinstance(selectable_cols, tuple) and len(selectable_cols) == 2:
+        a, b = selectable_cols[0], selectable_cols[1]
+        if isinstance(a, list) and isinstance(b, list):
+            selectable = set(a) | set(b)
+        else:
+            selectable = set(selectable_cols)
+    else:
+        selectable = set(selectable_cols)
+
+    valid_features = [f for f in features if f in selectable and f in df.columns]
+
     if target:
         valid_features = [f for f in valid_features if f != target]
-    
-    # Ensure target is valid if set
-    if target and target not in numeric_cols:
+
+    if target and target not in selectable:
         target = None
-    
+
     return target, valid_features
