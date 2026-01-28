@@ -597,6 +597,7 @@ if df is not None:
                 if len(high_missing) > 0:
                     next_steps.append(f"**High missingness** in {len(high_missing)} columns → Run 'Missingness Scan' in EDA page")
             
+            
             # Check for unit issues
             if df is not None and target_col:
                 signals = compute_dataset_signals(

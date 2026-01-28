@@ -373,38 +373,6 @@ if eda_only or prep_only:
                 st.markdown(f"• {insight['finding']}")
                 st.caption(f"  → {insight['implication']}")
 
-# Compute coach recommendations (using cached function)
-# Create a hash for the dataframe to use as cache key
-_df_hash = hash((len(df), tuple(df.columns)))
-_eda_results_keys = tuple(sorted(st.session_state.get('eda_results', {}).keys()))
-coach_recs = _compute_coach_recommendations(
-    _df_hash, data_config.target_col, task_type_final, cohort_type_final, entity_id_final, _eda_results_keys
-)
-
-if coach_recs:
-    with st.expander("Model Selection Coach", expanded=True):
-        st.caption("Selections here sync with Preprocessing; pick models there first to build pipelines.")
-        st.markdown("**Based on your data, try these first:**")
-        for idx, rec in enumerate(coach_recs[:3]):
-            display_name = rec.display_name if hasattr(rec, 'display_name') else f"{rec.group} Models"
-            priority_label = "High" if rec.priority <= 2 else "Medium"
-            st.markdown(f"**{display_name}** ({priority_label})")
-            if hasattr(rec, 'readiness_checks') and rec.readiness_checks:
-                st.caption("Prerequisites: " + "; ".join(rec.readiness_checks[:2]))
-            with st.expander("Why?"):
-                for reason in rec.why[:3]:
-                    st.write(f"• {reason}")
-                if rec.when_not_to_use:
-                    st.caption("When not to use: " + "; ".join(rec.when_not_to_use[:2]))
-                if rec.suggested_preprocessing:
-                    st.caption("Preprocessing: " + "; ".join(rec.suggested_preprocessing[:2]))
-            button_key = f"coach_select_{rec.group}_p{rec.priority}_i{idx}"
-            if st.button(f"Select {display_name}", key=button_key):
-                for model_key in rec.recommended_models:
-                    st.session_state[f'train_model_{model_key}'] = True
-                st.success(f"Selected {len(rec.recommended_models)} {display_name}")
-                st.rerun()
-
 # Model selection and configuration
 st.header("Model Configuration")
 _prep_pipes = st.session_state.get("preprocessing_pipelines_by_model") or {}
@@ -427,351 +395,137 @@ available_models = {
 }
 
 # Sync Train & Compare selections from Preprocessing (before any checkbox)
-_prep_built = st.session_state.get("preprocess_built_model_keys", [])
-for _k in _prep_built:
+# Only set if not already set to avoid widget conflicts
+_prep_built_sync = st.session_state.get("preprocess_built_model_keys", [])
+for _k in _prep_built_sync:
     if _k not in available_models:
         continue
     _key = f"train_model_{_k}"
+    # Only set if key doesn't exist to avoid widget default value conflicts
     if _key not in st.session_state:
         st.session_state[_key] = True
 
-# ============================================================================
-# COACH-INTEGRATED MODEL BUCKETS
-# ============================================================================
-# Get comprehensive coach output if available
-coach_output = st.session_state.get('coach_output')
-
-# CSS for model buckets
-st.markdown("""
-<style>
-.bucket-header {
-    padding: 0.5rem 1rem;
-    border-radius: 8px;
-    margin-bottom: 0.5rem;
-    font-weight: 600;
-}
-.bucket-recommended { background: #d4edda; color: #155724; border-left: 4px solid #28a745; }
-.bucket-worth-trying { background: #fff3cd; color: #856404; border-left: 4px solid #ffc107; }
-.bucket-not-recommended { background: #f8d7da; color: #721c24; border-left: 4px solid #dc3545; }
-.model-rationale {
-    font-size: 0.85rem;
-    color: #666;
-    padding: 0.25rem 0;
-}
-.training-time-badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 0.75rem;
-    margin-left: 0.5rem;
-}
-.time-fast { background: #d4edda; color: #155724; }
-.time-medium { background: #fff3cd; color: #856404; }
-.time-slow { background: #f8d7da; color: #721c24; }
-</style>
-""", unsafe_allow_html=True)
-
-# Initialize model_config and tracking variables (needed by both views and training)
+# Initialize model_config and tracking variables
 model_config = st.session_state.get('model_config', ModelConfig())
 models_to_train = []
 selected_model_params = st.session_state.get('selected_model_params', {})
 
-# Display models in buckets if we have coach output with detailed recommendations
-if coach_output and hasattr(coach_output, 'recommended_models') and coach_output.recommended_models:
-    st.caption("Selections sync with Preprocessing; pick models there first to build pipelines.")
-    st.markdown("Models by fit: **Recommended** (best), **Worth Trying** (caveats), **Not Recommended** (limitations).")
-    model_view = st.radio(
-        "View models by:",
-        ["Coach Recommendations", "Model Family"],
-        horizontal=True,
-        key="model_view_mode"
-    )
+# Check if data has been preprocessed
+_prep_built = st.session_state.get("preprocess_built_model_keys", [])
+_has_preprocessing = len(_prep_built) > 0 or pipeline is not None
+
+# Warning banner for unprocessed data
+if not _has_preprocessing:
+    st.warning("⚠️ **Warning:** You are about to train models with unprocessed data. It is recommended to preprocess your data first in the Preprocess page to ensure optimal model performance.")
+
+# Group models by family, ordered by explainability (high -> medium -> low)
+# Define explainability order: Linear (high) > Probabilistic (high) > Trees (medium) > Distance (medium) > Boosting (low) > Margin (low) > Neural Net (low)
+EXPLAINABILITY_ORDER = {
+    'Linear': 1,
+    'Probabilistic': 2,
+    'Trees': 3,
+    'Distance': 4,
+    'Boosting': 5,
+    'Margin': 6,
+    'Neural Net': 7
+}
+
+# Family-based model selection grouped by explainability
+# Group models by family
+model_groups = {}
+for key, spec in available_models.items():
+    group = spec.group
+    if group not in model_groups:
+        model_groups[group] = []
+    model_groups[group].append((key, spec))
+
+# Sort groups by explainability order (most explainable first)
+sorted_groups = sorted(model_groups.keys(), key=lambda g: EXPLAINABILITY_ORDER.get(g, 999))
+
+# Display models by group, ordered by explainability
+for group_name in sorted_groups:
+    st.subheader(f"{group_name} Models")
+    group_models = model_groups[group_name]
     
-    if model_view == "Coach Recommendations":
-        # Tab-based view of buckets
-        tab_rec, tab_try, tab_not = st.tabs([
-            f"Recommended ({len(coach_output.recommended_models)})",
-            f"Worth Trying ({len(coach_output.worth_trying_models)})",
-            f"Not Recommended ({len(coach_output.not_recommended_models)})"
-        ])
+    for model_key, spec in group_models:
+        # Check if model is selected
+        checkbox_key = f"train_model_{model_key}"
+        # Initialize in session_state if not present to avoid widget conflicts
+        if checkbox_key not in st.session_state:
+            st.session_state[checkbox_key] = False
         
-        # Recommended Tab
-        with tab_rec:
-            st.markdown('<div class="bucket-header bucket-recommended">Recommended Models</div>', 
-                       unsafe_allow_html=True)
-            st.caption("These models are well-suited to your dataset.")
-            if st.button("Select all recommended", key="coach_select_all_recommended"):
-                for rec in coach_output.recommended_models:
-                    if rec.model_key in available_models:
-                        st.session_state[f"train_model_{rec.model_key}"] = True
-                st.success("Selected all recommended.")
-                st.rerun()
-            for rec in coach_output.recommended_models:
-                if rec.model_key not in available_models:
-                    continue
-                    
-                spec = available_models[rec.model_key]
-                time_class = f"time-{rec.training_time.value}"
-                time_label = rec.training_time.value.title()
-                
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    checkbox_key = f"train_model_{rec.model_key}"
-                    is_selected = st.checkbox(
-                        f"**{rec.model_name}** ",
-                        value=st.session_state.get(checkbox_key, False),
-                        key=checkbox_key
-                    )
-                    st.markdown(f'<span class="model-rationale">{rec.dataset_fit_summary}</span>', 
-                               unsafe_allow_html=True)
-                with col2:
-                    st.markdown(f'<span class="training-time-badge {time_class}">{time_label}</span>',
-                               unsafe_allow_html=True)
-                
-                if is_selected:
-                    models_to_train.append(rec.model_key)
-                    
-                    # Show hyperparameters
-                    if spec.hyperparam_schema:
-                        with st.expander(f"{rec.model_name} Settings"):
-                            st.markdown(f"*{rec.rationale}*")
-                            params = {}
-                            for param_name, param_def in spec.hyperparam_schema.items():
-                                param_key = f"{rec.model_key}_{param_name}"
-                                if param_def['type'] == 'int':
-                                    params[param_name] = st.number_input(
-                                        param_def.get('help', param_name),
-                                        min_value=param_def['min'],
-                                        max_value=param_def['max'],
-                                        value=param_def['default'],
-                                        key=param_key
-                                    )
-                                elif param_def['type'] == 'float':
-                                    format_str = "%.4f" if param_def.get('log', False) else "%.2f"
-                                    params[param_name] = st.number_input(
-                                        param_def.get('help', param_name),
-                                        min_value=param_def['min'],
-                                        max_value=param_def['max'],
-                                        value=param_def['default'],
-                                        format=format_str,
-                                        key=param_key
-                                    )
-                                elif param_def['type'] == 'select':
-                                    options = param_def['options']
-                                    default_idx = options.index(param_def['default'])
-                                    params[param_name] = st.selectbox(
-                                        param_def.get('help', param_name),
-                                        options=options,
-                                        index=default_idx,
-                                        key=param_key
-                                    )
-                            selected_model_params[rec.model_key] = params
-                
-                st.markdown("---")
-        
-        # Worth Trying Tab
-        with tab_try:
-            st.markdown('<div class="bucket-header bucket-worth-trying">Worth Trying</div>', 
-                       unsafe_allow_html=True)
-            st.caption("These models may work but have some caveats.")
-            if st.button("Select all worth trying", key="coach_select_all_worth_trying"):
-                for rec in coach_output.worth_trying_models:
-                    if rec.model_key in available_models:
-                        st.session_state[f"train_model_{rec.model_key}"] = True
-                st.success("Selected all worth trying.")
-                st.rerun()
-            for rec in coach_output.worth_trying_models:
-                if rec.model_key not in available_models:
-                    continue
-                    
-                spec = available_models[rec.model_key]
-                
-                with st.expander(f"**{rec.model_name}** — {rec.dataset_fit_summary}"):
-                    st.markdown(f"*{rec.rationale}*")
-                    if rec.risks:
-                        st.warning("**Risks:** " + "; ".join(rec.risks[:2]))
-                    
-                    checkbox_key = f"train_model_{rec.model_key}"
-                    is_selected = st.checkbox(
-                        f"Select {rec.model_name} for training",
-                        value=st.session_state.get(checkbox_key, False),
-                        key=checkbox_key
-                    )
-                    
-                    if is_selected:
-                        models_to_train.append(rec.model_key)
-                        if spec.hyperparam_schema:
-                            params = {}
-                            for param_name, param_def in spec.hyperparam_schema.items():
-                                param_key = f"{rec.model_key}_{param_name}"
-                                if param_def['type'] == 'int':
-                                    params[param_name] = st.number_input(
-                                        param_def.get('help', param_name),
-                                        min_value=param_def['min'],
-                                        max_value=param_def['max'],
-                                        value=param_def['default'],
-                                        key=param_key
-                                    )
-                                elif param_def['type'] == 'float':
-                                    params[param_name] = st.number_input(
-                                        param_def.get('help', param_name),
-                                        min_value=param_def['min'],
-                                        max_value=param_def['max'],
-                                        value=param_def['default'],
-                                        format="%.4f",
-                                        key=param_key
-                                    )
-                                elif param_def['type'] == 'select':
-                                    options = param_def['options']
-                                    default_idx = options.index(param_def['default'])
-                                    params[param_name] = st.selectbox(
-                                        param_def.get('help', param_name),
-                                        options=options,
-                                        index=default_idx,
-                                        key=param_key
-                                    )
-                            selected_model_params[rec.model_key] = params
-        
-        # Not Recommended Tab
-        with tab_not:
-            st.markdown('<div class="bucket-header bucket-not-recommended">Not Recommended</div>', 
-                       unsafe_allow_html=True)
-            st.caption("These models are not well-suited for your current dataset. Use with caution.")
-            
-            for rec in coach_output.not_recommended_models:
-                if rec.model_key not in available_models:
-                    continue
-                    
-                spec = available_models[rec.model_key]
-                
-                with st.expander(f"**{rec.model_name}** — Why not recommended"):
-                    st.error(f"**Reason:** {rec.rationale}")
-                    if rec.risks:
-                        for risk in rec.risks[:3]:
-                            st.markdown(f"• {risk}")
-                    
-                    st.markdown(f"**When this model IS appropriate:** {rec.when_to_use}")
-                    
-                    checkbox_key = f"train_model_{rec.model_key}"
-                    is_selected = st.checkbox(
-                        f"Train anyway (not recommended)",
-                        value=st.session_state.get(checkbox_key, False),
-                        key=checkbox_key
-                    )
-                    
-                    if is_selected:
-                        models_to_train.append(rec.model_key)
-                        st.warning("You've selected a model that may not perform well on your data.")
-    else:
-        # Fall through to family-based view
-        pass
-else:
-    model_view = "Model Family"  # Default to family view if no coach output
-
-# Family-based model selection (original view or when coach not available)
-if model_view == "Model Family" or not coach_output:
-    # Group models by group
-    model_groups = {}
-    for key, spec in available_models.items():
-        group = spec.group
-        if group not in model_groups:
-            model_groups[group] = []
-        model_groups[group].append((key, spec))
-
-    # Define advanced model groups
-    advanced_groups = ['Margin', 'Probabilistic']  # SVM, Naive Bayes, LDA
-
-    # Check if there are any advanced models available for the current task type
-    advanced_model_count = sum(
-        len(model_groups.get(group, [])) 
-        for group in advanced_groups 
-        if group in model_groups
-    )
-
-    # Advanced models toggle - only show if there are advanced models
-    if advanced_model_count > 0:
-        show_advanced = st.checkbox(
-            f"Show Advanced Models ({advanced_model_count} available)", 
-            value=st.session_state.get('show_advanced_models', False), 
-            key="show_advanced_models",
-            help="Advanced models include SVMs, Naive Bayes, and Linear Discriminant Analysis"
+        is_selected = st.checkbox(
+            spec.name,
+            value=st.session_state[checkbox_key],
+            key=checkbox_key,
+            help=", ".join(spec.capabilities.notes) if spec.capabilities.notes else None
         )
-    else:
-        show_advanced = False
-        st.caption("No advanced models available for this task type.")
-
-    # Display models by group
-    for group_name in sorted(model_groups.keys()):
-        if group_name in advanced_groups and not show_advanced:
-            continue
         
-        st.subheader(f"{group_name} Models")
-        group_models = model_groups[group_name]
+        # Check if this model was preprocessed
+        # _prep_built contains the list of models that were specifically selected during preprocessing
+        # (it excludes "default" pipeline, so it's the definitive list of preprocessed models)
+        model_has_preprocessing = model_key in _prep_built
         
-        for model_key, spec in group_models:
-            # Check if model is selected
-            checkbox_key = f"train_model_{model_key}"
-            is_selected = st.checkbox(
-                spec.name,
-                value=st.session_state.get(checkbox_key, False),
-                key=checkbox_key,
-                help=", ".join(spec.capabilities.notes) if spec.capabilities.notes else None
-            )
+        # Show warning banner directly underneath checkbox if model is selected but wasn't preprocessed
+        # Only show if some models were preprocessed (len(_prep_built) > 0) to avoid redundant warnings
+        # when no preprocessing exists at all (in which case the general warning at top is shown)
+        if is_selected and not model_has_preprocessing and len(_prep_built) > 0:
+            st.warning(f"⚠️ **Warning:** {spec.name} was not selected during preprocessing. This model will train on raw, unprocessed data, which may result in suboptimal performance.")
+        
+        if is_selected:
+            models_to_train.append(model_key)
             
-            if is_selected:
-                models_to_train.append(model_key)
-                
-                # Hyperparameter controls
-                if spec.hyperparam_schema:
-                    with st.expander(f"{spec.name} Hyperparameters"):
-                        params = {}
-                        automl_best = st.session_state.get("nn_automl_best_params", {}) if model_key == "nn" else {}
-                        for param_name, param_def in spec.hyperparam_schema.items():
-                            param_key = f"{model_key}_{param_name}"
+            # Hyperparameter controls
+            if spec.hyperparam_schema:
+                with st.expander(f"{spec.name} Hyperparameters"):
+                    params = {}
+                    automl_best = st.session_state.get("nn_automl_best_params", {}) if model_key == "nn" else {}
+                    for param_name, param_def in spec.hyperparam_schema.items():
+                        param_key = f"{model_key}_{param_name}"
+                        default_val = automl_best.get(param_name, param_def['default'])
+                        if param_def['type'] == 'int':
+                            params[param_name] = st.number_input(
+                                param_def.get('help', param_name),
+                                min_value=param_def['min'],
+                                max_value=param_def['max'],
+                                value=default_val,
+                                key=param_key
+                            )
+                        elif param_def['type'] == 'float':
+                            format_str = "%.4f" if param_def.get('log', False) else "%.2f"
+                            params[param_name] = st.number_input(
+                                param_def.get('help', param_name),
+                                min_value=param_def['min'],
+                                max_value=param_def['max'],
+                                value=default_val,
+                                format=format_str,
+                                key=param_key
+                            )
+                        elif param_def['type'] == 'select':
+                            options = param_def['options']
                             default_val = automl_best.get(param_name, param_def['default'])
-                            if param_def['type'] == 'int':
+                            default_idx = options.index(default_val) if default_val in options else options.index(param_def['default'])
+                            params[param_name] = st.selectbox(
+                                param_def.get('help', param_name),
+                                options=options,
+                                index=default_idx,
+                                key=param_key
+                            )
+                        elif param_def['type'] == 'int_or_none':
+                            # Special handling for max_depth=None
+                            use_none = st.checkbox(f"{param_name} = None (unlimited)", value=param_def['default'] is None, key=f"{param_key}_none")
+                            if use_none:
+                                params[param_name] = None
+                            else:
                                 params[param_name] = st.number_input(
                                     param_def.get('help', param_name),
                                     min_value=param_def['min'],
                                     max_value=param_def['max'],
-                                    value=default_val,
+                                    value=param_def['min'] if param_def['default'] is None else param_def['default'],
                                     key=param_key
                                 )
-                            elif param_def['type'] == 'float':
-                                format_str = "%.4f" if param_def.get('log', False) else "%.2f"
-                                params[param_name] = st.number_input(
-                                    param_def.get('help', param_name),
-                                    min_value=param_def['min'],
-                                    max_value=param_def['max'],
-                                    value=default_val,
-                                    format=format_str,
-                                    key=param_key
-                                )
-                            elif param_def['type'] == 'select':
-                                options = param_def['options']
-                                default_val = automl_best.get(param_name, param_def['default'])
-                                default_idx = options.index(default_val) if default_val in options else options.index(param_def['default'])
-                                params[param_name] = st.selectbox(
-                                    param_def.get('help', param_name),
-                                    options=options,
-                                    index=default_idx,
-                                    key=param_key
-                                )
-                            elif param_def['type'] == 'int_or_none':
-                                # Special handling for max_depth=None
-                                use_none = st.checkbox(f"{param_name} = None (unlimited)", value=param_def['default'] is None, key=f"{param_key}_none")
-                                if use_none:
-                                    params[param_name] = None
-                                else:
-                                    params[param_name] = st.number_input(
-                                        param_def.get('help', param_name),
-                                        min_value=param_def['min'],
-                                        max_value=param_def['max'],
-                                        value=param_def['min'] if param_def['default'] is None else param_def['default'],
-                                        key=param_key
-                                    )
-                        
-                        selected_model_params[model_key] = params
+                    
+                    selected_model_params[model_key] = params
 
 st.session_state.model_config = model_config
 
@@ -787,7 +541,7 @@ with st.expander("Pre-training Coach Tips", expanded=False):
         st.info("Run EDA and check the Model Selection Coach for preprocessing recommendations.")
     st.markdown("**Tip:** Ensure your preprocessing pipeline matches your selected models. Linear models and neural nets require scaling; tree models do not.")
 
-# Auto-tune NN (Optuna) - gate on optuna availability
+# Check Optuna availability
 _has_optuna = False
 try:
     import optuna
@@ -795,134 +549,141 @@ try:
 except Exception:
     pass
 
-_nn_selected = st.session_state.get("train_model_nn", False)
-if _nn_selected and _has_optuna:
-    st.markdown("---")
-    st.subheader("Auto-tune Neural Network")
-    st.caption("Run Optuna to search for a good NN architecture and training config (e.g. 30 trials), then train the final model with the best params.")
-    if st.button("Auto-tune NN", type="primary", key="automl_nn_button"):
-        NNWeightedHuberWrapper, _, _, _, _ = _get_model_wrappers()
-        model_pipeline = get_preprocessing_pipeline("nn") or get_preprocessing_pipeline()
-        if model_pipeline is None:
-            st.error("Preprocessing pipeline not found. Build a pipeline for NN in the Preprocess page.")
+# Generic Optuna optimization function
+def optimize_model_hyperparameters(model_name, spec, X_train_transformed, y_train, X_val_transformed, y_val, task_type, random_seed, n_trials=30):
+    """
+    Generic function to optimize hyperparameters for any model using Optuna.
+    
+    Returns:
+        dict: Best hyperparameters found
+    """
+    if not _has_optuna:
+        return None
+    
+    if not spec.hyperparam_schema:
+        return None  # No hyperparameters to optimize
+    
+    NNWeightedHuberWrapper, GLMWrapper, HuberGLMWrapper, RFWrapper, RegistryModelWrapper = _get_model_wrappers()
+    
+    def _objective(trial):
+        # Suggest hyperparameters based on schema
+        params = {}
+        for param_name, param_def in spec.hyperparam_schema.items():
+            if param_def['type'] == 'int':
+                params[param_name] = trial.suggest_int(param_name, param_def['min'], param_def['max'])
+            elif param_def['type'] == 'float':
+                log_scale = param_def.get('log', False)
+                min_val = param_def['min']
+                max_val = param_def['max']
+                # Optuna requires min > 0 for log=True
+                if log_scale and min_val <= 0:
+                    # Use a small positive value instead
+                    min_val = max(1e-5, min_val)
+                params[param_name] = trial.suggest_float(param_name, min_val, max_val, log=log_scale)
+            elif param_def['type'] == 'select':
+                selected_value = trial.suggest_categorical(param_name, param_def['options'])
+                # Special handling for SVR/SVC gamma parameter: convert numeric strings to floats
+                if param_name == 'gamma' and selected_value not in ['scale', 'auto']:
+                    try:
+                        params[param_name] = float(selected_value)
+                    except (ValueError, TypeError):
+                        params[param_name] = selected_value
+                else:
+                    params[param_name] = selected_value
+            elif param_def['type'] == 'int_or_none':
+                # For int_or_none, suggest int with option for None
+                use_none = trial.suggest_categorical(f"{param_name}_use_none", [False, True])
+                if use_none:
+                    params[param_name] = None
+                else:
+                    params[param_name] = trial.suggest_int(param_name, param_def['min'], param_def['max'])
+        
+        # Special handling for neural network
+        if model_name == 'nn':
+            num_layers = params.get('num_layers', 2)
+            layer_width = params.get('layer_width', 32)
+            pattern = params.get('architecture_pattern', 'constant')
+            
+            if pattern == 'constant':
+                hidden_layers = [layer_width] * num_layers
+            elif pattern == 'pyramid':
+                hidden_layers = [layer_width * (2 ** i) for i in range(num_layers)]
+            elif pattern == 'funnel':
+                max_width = layer_width * (2 ** (num_layers - 1))
+                hidden_layers = [max_width // (2 ** i) for i in range(num_layers)]
+            else:
+                hidden_layers = [layer_width] * num_layers
+            
+            model = NNWeightedHuberWrapper(
+                hidden_layers=hidden_layers,
+                dropout=params.get('dropout', 0.1),
+                task_type=task_type,
+                activation=params.get('activation', 'relu')
+            )
+            res = model.fit(
+                X_train_transformed, y_train, X_val_transformed, y_val,
+                epochs=params.get('epochs', 200),
+                batch_size=params.get('batch_size', 256),
+                lr=params.get('lr', 0.0015),
+                weight_decay=params.get('weight_decay', 0.0002),
+                patience=params.get('patience', 30),
+                random_seed=random_seed
+            )
+            hist = res.get("history", {}) if isinstance(res, dict) else {}
+            if task_type == "regression":
+                vlm = hist.get("val_rmse", [])
+                return vlm[-1] if vlm else float("inf")
+            else:
+                vlm = hist.get("val_accuracy", [])
+                return 1.0 - (vlm[-1] if vlm else 1.0)  # Convert to minimize
         else:
-            try:
-                with st.spinner("Auto-tuning NN (Optuna)..."):
-                    model_pipeline.fit(X_train)
-                    Xt = model_pipeline.transform(X_train)
-                    Xv = model_pipeline.transform(X_val)
-                    if hasattr(Xt, "toarray"):
-                        Xt, Xv = Xt.toarray(), Xv.toarray()
-                    yt = to_numpy_1d(y_train)
-                    yv = to_numpy_1d(y_val)
-                    task = task_type_final
-                    seed = st.session_state.get("random_seed", 42)
-                    n_trials = 30
+            # For sklearn-based models
+            estimator = spec.factory(task_type, random_seed)
+            for param_name, param_value in params.items():
+                if hasattr(estimator, param_name):
+                    # Special handling for SVR/SVC gamma parameter: convert numeric strings to floats
+                    if param_name == 'gamma' and isinstance(param_value, str) and param_value not in ['scale', 'auto']:
+                        try:
+                            param_value = float(param_value)
+                        except (ValueError, TypeError):
+                            pass  # Keep original value if conversion fails
+                    setattr(estimator, param_name, param_value)
+            
+            # Fit and evaluate
+            estimator.fit(X_train_transformed, y_train)
+            
+            if task_type == "regression":
+                from sklearn.metrics import mean_squared_error
+                y_pred = estimator.predict(X_val_transformed)
+                return np.sqrt(mean_squared_error(y_val, y_pred))
+            else:
+                from sklearn.metrics import accuracy_score
+                y_pred = estimator.predict(X_val_transformed)
+                return 1.0 - accuracy_score(y_val, y_pred)  # Convert to minimize
+    
+    direction = "minimize"  # Always minimize (we convert accuracy to error)
+    study = optuna.create_study(direction=direction)
+    study.optimize(_objective, n_trials=n_trials, show_progress_bar=False)
+    
+    return study.best_params
 
-                    def _objective(trial):
-                        num_layers = trial.suggest_int("num_layers", 1, 4)
-                        layer_width = trial.suggest_int("layer_width", 16, 128)
-                        pattern = trial.suggest_categorical("architecture_pattern", ["constant", "pyramid", "funnel"])
-                        activation = trial.suggest_categorical("activation", ["relu", "tanh", "elu"])
-                        dropout = trial.suggest_float("dropout", 0.0, 0.4)
-                        epochs = trial.suggest_int("epochs", 80, 250)
-                        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
-                        lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-                        weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True)
-                        patience = trial.suggest_int("patience", 15, 40)
-                        if pattern == "constant":
-                            hidden = [layer_width] * num_layers
-                        elif pattern == "pyramid":
-                            hidden = [layer_width * (2 ** i) for i in range(num_layers)]
-                        else:
-                            mw = layer_width * (2 ** (num_layers - 1))
-                            hidden = [mw // (2 ** i) for i in range(num_layers)]
-                        m = NNWeightedHuberWrapper(hidden_layers=hidden, dropout=dropout, task_type=task, activation=activation)
-                        res = m.fit(Xt, yt, Xv, yv, epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay, patience=patience, random_seed=seed)
-                        hist = res.get("history", {}) if isinstance(res, dict) else {}
-                        if task == "regression":
-                            vlm = hist.get("val_rmse", [])
-                            return vlm[-1] if vlm else float("inf")
-                        vlm = hist.get("val_accuracy", [])
-                        return vlm[-1] if vlm else 0.0
-
-                    direction = "minimize" if task == "regression" else "maximize"
-                    study = optuna.create_study(direction=direction)
-                    study.optimize(_objective, n_trials=n_trials, show_progress_bar=False)
-                    best = study.best_params
-                    st.session_state["nn_automl_best_params"] = best
-
-                    num_layers = best["num_layers"]
-                    layer_width = best["layer_width"]
-                    pattern = best["architecture_pattern"]
-                    if pattern == "constant":
-                        hidden_layers = [layer_width] * num_layers
-                    elif pattern == "pyramid":
-                        hidden_layers = [layer_width * (2 ** i) for i in range(num_layers)]
-                    else:
-                        mw = layer_width * (2 ** (num_layers - 1))
-                        hidden_layers = [mw // (2 ** i) for i in range(num_layers)]
-                    model = NNWeightedHuberWrapper(
-                        hidden_layers=hidden_layers,
-                        dropout=best["dropout"],
-                        task_type=task,
-                        activation=best["activation"],
-                    )
-                    res = model.fit(
-                        Xt, yt, Xv, yv,
-                        epochs=best["epochs"],
-                        batch_size=best["batch_size"],
-                        lr=best["lr"],
-                        weight_decay=best["weight_decay"],
-                        patience=best["patience"],
-                        random_seed=seed,
-                    )
-                    from models.nn_whuber import SklearnCompatibleNN
-                    from ml.pipeline import get_feature_names_after_transform
-                    from ml.eval import calculate_regression_metrics, calculate_classification_metrics
-                    sk = SklearnCompatibleNN(model, task)
-                    sk.is_fitted_ = True
-                    sk.n_features_in_ = Xt.shape[1]
-                    if task == "classification":
-                        sk.classes_ = np.unique(yt)
-                    X_test_m = model_pipeline.transform(X_test)
-                    if hasattr(X_test_m, "toarray"):
-                        X_test_m = X_test_m.toarray()
-                    y_pred = model.predict(X_test_m)
-                    if task == "regression":
-                        met = calculate_regression_metrics(to_numpy_1d(y_test), y_pred)
-                    else:
-                        met = calculate_classification_metrics(to_numpy_1d(y_test), y_pred, model.predict_proba(X_test_m))
-                    model_results_nn = {
-                        "metrics": met, "history": res.get("history", {}),
-                        "y_test_pred": y_pred, "y_test": y_test,
-                        "architecture": model.get_architecture_summary(),
-                    }
-                    add_trained_model("nn", model, model_results_nn)
-                    st.session_state.setdefault("fitted_estimators", {})["nn"] = sk
-                    st.session_state.setdefault("fitted_preprocessing_pipelines", {})["nn"] = model_pipeline
-                    st.session_state.setdefault("feature_names_by_model", {})["nn"] = get_feature_names_after_transform(
-                        model_pipeline, data_config.feature_cols
-                    )
-                    st.success(f"Auto-tune complete. Best val {'RMSE' if task == 'regression' else 'accuracy'}: {study.best_value:.4f}. NN trained and stored.")
-            except Exception as e:
-                st.error(f"Auto-tune NN failed: {e}")
-                logger.exception(e)
-elif _nn_selected and not _has_optuna:
-    st.caption("Install optuna (`pip install optuna`) to use Auto-tune NN.")
-
-# Training
-if st.button("Train Models", type="primary", key="train_models_button") and models_to_train:
+def _train_models(models_to_train, selected_model_params, use_optimization=False):
+    """Train models with optional hyperparameter optimization."""
     # Lazy import model wrappers and evaluation functions only when training
     NNWeightedHuberWrapper, GLMWrapper, HuberGLMWrapper, RFWrapper, RegistryModelWrapper = _get_model_wrappers()
     calculate_regression_metrics, calculate_classification_metrics, perform_cross_validation, analyze_residuals = _get_eval_functions()
     from sklearn.pipeline import Pipeline as SklearnPipeline
     
     progress_container = st.container()
+    random_seed = st.session_state.get('random_seed', 42)
     
     for model_name in models_to_train:
         with progress_container:
-            st.subheader(f"Training {model_name.upper()}")
+            if use_optimization:
+                st.subheader(f"Optimizing and Training {model_name.upper()}")
+                st.info("⏱️ Hyperparameter optimization in progress. This may take several minutes...")
+            else:
+                st.subheader(f"Training {model_name.upper()}")
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -943,6 +704,20 @@ if st.button("Train Models", type="primary", key="train_models_button") and mode
                     X_train_model = X_train_model.toarray()
                     X_val_model = X_val_model.toarray()
                     X_test_model = X_test_model.toarray()
+                
+                # Optimize hyperparameters if requested
+                if use_optimization and spec and spec.hyperparam_schema:
+                    status_text.text("Running Optuna hyperparameter optimization...")
+                    best_params = optimize_model_hyperparameters(
+                        model_name, spec, X_train_model, y_train, X_val_model, y_val,
+                        task_type_final, random_seed, n_trials=30
+                    )
+                    if best_params:
+                        # Update selected_model_params with optimized values
+                        selected_model_params[model_name] = best_params
+                        st.success(f"Optimization complete! Best parameters found for {model_name.upper()}")
+                    else:
+                        st.warning(f"Could not optimize {model_name}. Using default parameters.")
                 
                 # Handle existing wrappers (nn, rf, glm, huber) with special logic
                 if model_name == 'nn':
@@ -1033,6 +808,12 @@ if st.button("Train Models", type="primary", key="train_models_button") and mode
                     # Set hyperparameters
                     for param_name, param_value in params.items():
                         if hasattr(estimator, param_name):
+                            # Special handling for SVR/SVC gamma parameter: convert numeric strings to floats
+                            if param_name == 'gamma' and isinstance(param_value, str) and param_value not in ['scale', 'auto']:
+                                try:
+                                    param_value = float(param_value)
+                                except (ValueError, TypeError):
+                                    pass  # Keep original value if conversion fails
                             setattr(estimator, param_name, param_value)
                     
                     # Wrap in generic wrapper
@@ -1104,6 +885,35 @@ if st.button("Train Models", type="primary", key="train_models_button") and mode
                     st.error(f"Training failed: {str(e)}")
                     st.code(str(e), language='python')
                     logger.exception(e)
+
+# Training section with two buttons
+st.markdown("---")
+st.header("Train Models")
+
+if models_to_train:
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        train_standard = st.button("Train Models", type="primary", key="train_models_button", use_container_width=True)
+    
+    with col2:
+        train_optimized = st.button(
+            "Train Models with Hyperparameter Optimization", 
+            type="secondary", 
+            key="train_models_optimized_button",
+            use_container_width=True,
+            help="⚠️ This will take significantly longer as it searches for optimal hyperparameters using Optuna"
+        )
+    
+    if train_standard:
+        _train_models(models_to_train, selected_model_params, use_optimization=False)
+    elif train_optimized:
+        if not _has_optuna:
+            st.error("Optuna is not installed. Please install it with `pip install optuna` to use hyperparameter optimization.")
+        else:
+            _train_models(models_to_train, selected_model_params, use_optimization=True)
+elif not models_to_train:
+    st.info("Please select at least one model to train.")
 
 # Results comparison
 if st.session_state.get('trained_models'):

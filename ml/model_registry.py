@@ -476,7 +476,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             'epochs': {'type': 'int', 'min': 50, 'max': 500, 'default': 200, 'help': 'Number of epochs'},
             'batch_size': {'type': 'int', 'min': 32, 'max': 512, 'default': 256, 'help': 'Batch size'},
             'lr': {'type': 'float', 'min': 1e-5, 'max': 1e-2, 'default': 0.0015, 'log': True, 'help': 'Learning rate'},
-            'weight_decay': {'type': 'float', 'min': 0.0, 'max': 1e-2, 'default': 0.0002, 'log': True, 'help': 'L2 regularization (weight decay)'},
+            'weight_decay': {'type': 'float', 'min': 1e-5, 'max': 1e-2, 'default': 0.0002, 'log': True, 'help': 'L2 regularization (weight decay)'},
             'patience': {'type': 'int', 'min': 5, 'max': 50, 'default': 30, 'help': 'Early stopping patience'}
         },
         capabilities=ModelCapabilities(
