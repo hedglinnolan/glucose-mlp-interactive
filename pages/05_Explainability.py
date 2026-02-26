@@ -15,7 +15,7 @@ import logging
 from utils.session_state import (
     init_session_state, get_preprocessing_pipeline, DataConfig, get_data
 )
-from utils.storyline import render_progress_indicator
+from utils.storyline import render_progress_indicator, render_breadcrumb, render_page_navigation
 from ml.estimator_utils import is_estimator_fitted
 from ml.model_registry import get_registry
 from sklearn.pipeline import Pipeline as SklearnPipeline
@@ -30,9 +30,21 @@ init_session_state()
 
 st.set_page_config(page_title="Explainability", page_icon=None, layout="wide")
 st.title("Model Explainability")
+render_breadcrumb("05_Explainability")
+render_page_navigation("05_Explainability")
 
 # Progress indicator
 render_progress_indicator("05_Explainability")
+
+# Guardrail: Explainability is only for prediction mode
+task_mode = st.session_state.get('task_mode')
+if task_mode != 'prediction':
+    st.warning("⚠️ **Model Explainability is only available in Prediction mode.**")
+    st.info("""
+    Please go to the **Upload & Audit** page and select **Prediction** as your task mode.
+    Model explainability tools help understand how trained models make predictions.
+    """)
+    st.stop()
 
 # Check prerequisites
 if not st.session_state.get('trained_models'):
@@ -198,7 +210,7 @@ if st.session_state.get('permutation_importance'):
         
         # Show top features
         top_n = min(10, len(importance_df))
-        st.dataframe(importance_df.head(top_n), use_container_width=True)
+        st.dataframe(importance_df.head(top_n), width="stretch")
         
         # Plot
         fig = px.bar(
@@ -210,7 +222,7 @@ if st.session_state.get('permutation_importance'):
             title=f"{name.upper()} - Top {top_n} Features"
         )
         fig.update_layout(yaxis={'categoryorder': 'total ascending'})
-        st.plotly_chart(fig, use_container_width=True, key=f"perm_importance_{name}")
+        st.plotly_chart(fig, width="stretch", key=f"perm_importance_{name}")
         perm_aligned = {"feature_names": fn_slice, "importances_mean": im_slice, "importances_std": is_slice}
         nar = narrative_permutation_importance(perm_aligned, model_name=name)
         if nar:
@@ -256,7 +268,7 @@ if len(perm_names) >= 2:
             r_str = f"{r:.3f}" if r is not None else "N/A"
             rows.append({"Model A": ma, "Model B": mb, "Spearman ρ": r_str, "Top-5 overlap": v.get('top_k_overlap', 0)})
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch")
             from ml.plot_narrative import narrative_robustness
             from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
             pairs = list(rob.keys())
@@ -365,22 +377,29 @@ if st.button("Calculate Partial Dependence"):
                     top_indices = list(range(min(5, len(top_feature_names))))
                 
                 # Calculate partial dependence for top numeric original features only
+                # Map original feature names to transformed-space indices (handles one-hot encoding)
                 pd_results = {}
                 for feat_name in top_feature_names[:3]:  # Top 3
                     try:
                         # Find feature index in transformed space
+                        feat_idx = None
                         if feat_name in feature_names:
                             feat_idx = feature_names.index(feat_name)
                         else:
-                            # Try to find in original features
-                            if feat_name in original_features:
-                                # Map to transformed feature index
-                                feat_idx = original_features.index(feat_name)
-                                if feat_idx >= len(feature_names):
-                                    pd_errors.append(f"{name}: {feat_name} - feature index out of range")
-                                    continue
+                            # Original feature may be one-hot encoded: "sex" -> "sex_M", "sex_F"
+                            # Find transformed columns that match (prefix or exact)
+                            matching_indices = [
+                                i for i, fn in enumerate(feature_names)
+                                if fn == feat_name or fn.startswith(feat_name + "_") or fn.startswith(feat_name + " ")
+                            ]
+                            if len(matching_indices) == 1:
+                                feat_idx = matching_indices[0]
+                            elif len(matching_indices) > 1:
+                                # One-hot: use first encoded column (skip to avoid misleading PD)
+                                pd_errors.append(f"{name}: {feat_name} - one-hot encoded, skipping PD")
+                                continue
                             else:
-                                pd_errors.append(f"{name}: {feat_name} - feature not found")
+                                pd_errors.append(f"{name}: {feat_name} - feature not found in transformed space")
                                 continue
                         
                         # Use a sample for faster computation (handle sparse)
@@ -446,7 +465,7 @@ if st.session_state.get('partial_dependence'):
                         xaxis_title=feat_name,
                         yaxis_title="Partial Dependence"
                     )
-                    st.plotly_chart(fig, use_container_width=True, key=f"pd_plot_{name}_{feat_name}")
+                    st.plotly_chart(fig, width="stretch", key=f"pd_plot_{name}_{feat_name}")
                 except Exception as e:
                     st.warning(f"Error plotting PD for {feat_name}: {e}")
         
@@ -651,20 +670,27 @@ if use_shap:
                     and isinstance(full_pipeline, SklearnPipeline)
                     and 'preprocess' in getattr(full_pipeline, 'named_steps', {})
                 )
-                if use_tree_or_linear:
+                # Always use transformed (numeric) data for SHAP - raw DataFrames with categorical
+                # strings cause "could not convert string to float" in KernelExplainer
+                if isinstance(full_pipeline, SklearnPipeline) and 'preprocess' in getattr(full_pipeline, 'named_steps', {}):
                     prep = full_pipeline.named_steps['preprocess']
-                    X_transformed = prep.transform(X_test_raw)
+                    try:
+                        X_transformed = prep.transform(X_test_raw)
+                    except Exception as e:
+                        st.warning(f"{name.upper()}: Could not transform data for SHAP: {e}. Skipping.")
+                        continue
                     X_background = _to_dense_numpy(X_transformed[:min(background_size, len(X_transformed))])
                     X_eval = _to_dense_numpy(X_transformed[:min(eval_size, len(X_transformed))])
                 else:
                     bg_n = min(background_size, len(X_test_raw))
                     ev_n = min(eval_size, len(X_test_raw))
-                    if isinstance(X_test_raw, pd.DataFrame):
-                        X_background = X_test_raw.iloc[:bg_n].copy()
-                        X_eval = X_test_raw.iloc[:ev_n].copy()
-                    else:
+                    try:
                         X_background = _to_dense_numpy(X_test_raw[:bg_n])
                         X_eval = _to_dense_numpy(X_test_raw[:ev_n])
+                    except (ValueError, TypeError) as e:
+                        st.warning(f"{name.upper()}: SHAP requires numeric data. Your test set may contain categorical strings. "
+                                   f"Skipping. ({str(e)[:80]})")
+                        continue
 
                 try:
                     # Progress tracking
@@ -690,13 +716,17 @@ if use_shap:
                     else:
                         task_type = data_config.task_type if data_config else 'regression'
                         has_preprocess = isinstance(full_pipeline, SklearnPipeline) and 'preprocess' in getattr(full_pipeline, 'named_steps', {})
-                        fc = list(data_config.feature_cols) if (data_config and has_preprocess) else None
-                        _kernel_model = _ShapPredictWrapper(full_pipeline, feature_cols=fc)
-                        if task_type == 'classification' and hasattr(full_pipeline, 'predict_proba'):
+                        # Use model step only when we have transformed (numeric) data - full pipeline
+                        # expects raw input and would fail on SHAP's numeric arrays
+                        if has_preprocess:
+                            kernel_model = full_pipeline.named_steps['model']
+                        else:
+                            kernel_model = full_pipeline
+                        if task_type == 'classification' and hasattr(kernel_model, 'predict_proba'):
                             status_text.text("Preparing background data for KernelExplainer...")
                             progress_bar.progress(0.3)
                             explainer = shap.KernelExplainer(
-                                _kernel_model.predict_proba,
+                                kernel_model.predict_proba,
                                 X_background[:min(50, len(X_background))]
                             )
                             status_text.text("Computing SHAP values (this may take a while)...")
@@ -705,7 +735,7 @@ if use_shap:
                             progress_bar.progress(0.8)
                         else:
                             explainer = shap.KernelExplainer(
-                                _kernel_model.predict,
+                                kernel_model.predict,
                                 X_background[:min(50, len(X_background))]
                             )
                             status_text.text("Computing SHAP values (this may take a while)...")
@@ -875,7 +905,7 @@ if task_final == 'regression' and len(mr) >= 2:
             pb = np.asarray(mr[mb]['y_test_pred']).ravel()
             if len(pa) == len(pb):
                 fig_ba = plot_bland_altman(pa, pb, title=f"Bland–Altman: {ma.upper()} vs {mb.upper()}", label_a=ma, label_b=mb)
-                st.plotly_chart(fig_ba, use_container_width=True, key=f"bland_altman_{ma}_{mb}")
+                st.plotly_chart(fig_ba, width="stretch", key=f"bland_altman_{ma}_{mb}")
                 ba_stats = analyze_bland_altman(pa, pb)
                 nar = narrative_bland_altman(ba_stats, label_a=ma, label_b=mb)
                 if nar:

@@ -702,6 +702,62 @@ def test_eda_narratives_and_actions():
     assert "findings" in out2 and "figures" in out2 and "stats" in out2
 
 
+@test("Data: prepare_data with categorical target")
+def test_prepare_data_categorical():
+    import pandas as pd
+    from data_processor import prepare_data
+
+    df = pd.DataFrame({
+        "x1": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "x2": [10.0, 20.0, 30.0, 40.0, 50.0],
+        "target": ["A", "B", pd.NA, "A", "B"],
+    })
+    out = prepare_data(df, target_col="target", feature_cols=["x1", "x2"], test_size=0.2, val_size=0.2, seed=42)
+    X_train, X_val, X_test, y_train, y_val, y_test, scaler, feat_names = out
+    assert len(y_train) > 0, "Should have training samples after dropping NaN target"
+    assert len(feat_names) == 2, "Should have 2 feature names"
+    assert y_train.dtype == object or str(y_train.dtype) == "object", "Categorical target should remain object/string"
+
+
+@test("Data: load_csv encoding fallback")
+def test_load_csv_encoding_fallback():
+    import io
+    from data_processor import load_csv
+
+    csv_bytes = b"a,b\n1,2\n\xe9,3"
+    buf = io.BytesIO(csv_bytes)
+    df = load_csv(buf)
+    assert df is not None, "Should load with fallback encoding"
+    assert len(df) >= 2, "Should have at least 2 rows"
+    assert "a" in df.columns and "b" in df.columns, "Should have columns a, b"
+
+
+@test("Utils: make_unique_columns")
+def test_make_unique_columns():
+    from utils.column_utils import make_unique_columns
+
+    result = make_unique_columns(["a", "a", "b", "a"])
+    assert result == ["a", "a_1", "b", "a_2"], f"Expected ['a','a_1','b','a_2'], got {result}"
+
+
+@test("DatasetProfile: empty DataFrame raises ValueError")
+def test_dataset_profile_empty_guard():
+    import pandas as pd
+    from ml.dataset_profile import compute_dataset_profile
+
+    try:
+        compute_dataset_profile(
+            pd.DataFrame(),
+            target_col="x",
+            feature_cols=[],
+            task_type="regression",
+            outlier_method="iqr",
+        )
+        assert False, "Should have raised ValueError for empty DataFrame"
+    except ValueError as e:
+        assert "empty" in str(e).lower(), f"Expected empty-related message, got: {e}"
+
+
 # ============================================================
 # Main execution
 # ============================================================
@@ -761,7 +817,11 @@ def run_all_tests():
     test_ensure_ollama_running()
     test_upload_flow()
     test_eda_narratives_and_actions()
-    
+    test_prepare_data_categorical()
+    test_load_csv_encoding_fallback()
+    test_make_unique_columns()
+    test_dataset_profile_empty_guard()
+
     # Summary
     print("\n" + "=" * 60)
     passed = sum(1 for _, success, _ in results if success is True)

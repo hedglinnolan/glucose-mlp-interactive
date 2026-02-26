@@ -17,6 +17,11 @@ def correlation_test(
     """
     Correlation between two numeric vectors with p-value.
 
+    Args:
+        x: First numeric array
+        y: Second numeric array
+        method: 'pearson', 'spearman', or 'kendall'
+    
     Returns:
         (r, p, test_name)
     """
@@ -28,6 +33,9 @@ def correlation_test(
     if method == "spearman":
         r, p = stats.spearmanr(x, y)
         return (float(r), float(p), "Spearman")
+    elif method == "kendall":
+        r, p = stats.kendalltau(x, y)
+        return (float(r), float(p), "Kendall's Tau")
     else:
         r, p = stats.pearsonr(x, y)
         return (float(r), float(p), "Pearson")

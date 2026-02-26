@@ -205,9 +205,12 @@ def compute_feature_profile(df: pd.DataFrame, col: str, n: int, outlier_method: 
                 except:
                     profile.skewness = 0.0
             
-            # Outlier detection (configurable method)
-            outlier_mask, _ = detect_outliers(valid, method=outlier_method)
-            profile.outlier_count = int(outlier_mask.sum())
+            # Outlier detection (skip boolean columns - quantile fails on bool)
+            if valid.dtype != bool and not (hasattr(valid.dtype, 'kind') and valid.dtype.kind == 'b'):
+                outlier_mask, _ = detect_outliers(valid, method=outlier_method)
+                profile.outlier_count = int(outlier_mask.sum())
+            else:
+                profile.outlier_count = 0
             profile.outlier_rate = profile.outlier_count / len(valid) if len(valid) > 0 else 0.0
             profile.has_outliers = profile.outlier_rate > 0.01  # >1% outliers
     
@@ -525,6 +528,8 @@ def compute_dataset_profile(
     from datetime import datetime
     
     n = len(df)
+    if n == 0 or len(df.columns) == 0:
+        raise ValueError("Cannot compute profile for empty DataFrame")
     
     # Determine feature columns
     if feature_cols is None:

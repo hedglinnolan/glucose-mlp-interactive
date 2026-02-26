@@ -19,7 +19,7 @@ from utils.session_state import (
     DataConfig, SplitConfig, ModelConfig
 )
 from ml.pipeline import get_pipeline_recipe
-from utils.storyline import render_progress_indicator, get_insights_by_category
+from utils.storyline import render_progress_indicator, get_insights_by_category, render_breadcrumb, render_page_navigation
 from ml.model_registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -28,9 +28,21 @@ init_session_state()
 
 st.set_page_config(page_title="Report Export", page_icon=None, layout="wide")
 st.title("Report Export")
+render_breadcrumb("06_Report_Export")
+render_page_navigation("06_Report_Export")
 
 # Progress indicator
 render_progress_indicator("06_Report_Export")
+
+# Guardrail: Report Export is primarily for prediction mode
+task_mode = st.session_state.get('task_mode')
+if task_mode != 'prediction':
+    st.warning("⚠️ **Report Export is primarily designed for Prediction mode.**")
+    st.info("""
+    Please go to the **Upload & Audit** page and select **Prediction** as your task mode.
+    Comprehensive modeling reports include trained models, metrics, and explainability results.
+    """)
+    st.stop()
 
 # Check prerequisites
 df = get_data()

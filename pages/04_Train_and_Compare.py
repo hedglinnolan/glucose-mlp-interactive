@@ -15,7 +15,7 @@ from utils.session_state import (
     TaskTypeDetection, CohortStructureDetection
 )
 from utils.seed import set_global_seed, get_global_seed
-from utils.storyline import render_progress_indicator, get_insights_by_category
+from utils.storyline import render_progress_indicator, get_insights_by_category, render_breadcrumb, render_page_navigation
 from ml.splits import to_numpy_1d
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,8 @@ set_global_seed(st.session_state.get('random_seed', 42))
 
 st.set_page_config(page_title="Train & Compare", page_icon=None, layout="wide")
 st.title("Train & Compare Models")
+render_breadcrumb("04_Train_and_Compare")
+render_page_navigation("04_Train_and_Compare")
 
 # Progress indicator
 render_progress_indicator("04_Train_and_Compare")
@@ -105,6 +107,19 @@ with st.sidebar:
 df = get_data()
 if df is None:
     st.warning("Please upload data first")
+    st.stop()
+if len(df) == 0 or len(df.columns) == 0:
+    st.warning("Your dataset is empty. Please upload data with at least one row and one column.")
+    st.stop()
+
+# Guardrail: Training is only for prediction mode
+task_mode = st.session_state.get('task_mode')
+if task_mode != 'prediction':
+    st.warning("⚠️ **Model Training is only available in Prediction mode.**")
+    st.info("""
+    Please go to the **Upload & Audit** page and select **Prediction** as your task mode.
+    Model training is used to build predictive models.
+    """)
     st.stop()
 
 data_config: DataConfig = st.session_state.get('data_config')
@@ -217,10 +232,28 @@ if st.button("Prepare Splits", type="primary"):
         y = y[mask].reset_index(drop=True)
         original_indices = np.where(mask)[0]
         indices = np.arange(len(X))
+        
+        if len(X) < 2:
+            st.error("Not enough samples after removing missing target values. Need at least 2 rows for train/test split.")
+            st.stop()
 
         target_is_categorical = y.dtype.name in ("object", "category", "bool") or (
             hasattr(y.dtype, "kind") and y.dtype.kind in ("O", "b")
         )
+        
+        # Single-class validation for classification
+        if task_type_final == 'classification':
+            n_classes = y.nunique()
+            if n_classes < 2:
+                st.error(f"""
+                **Single-class target detected:** Your target has only {n_classes} unique value(s) after removing missing values.
+                
+                Classification requires at least 2 classes. Please check:
+                - That your target column has multiple distinct values
+                - That filtering (e.g., plausibility) did not remove all samples of one class
+                """)
+                st.stop()
+        
         le = None
         if target_is_categorical:
             le = LabelEncoder()
@@ -308,7 +341,7 @@ if st.button("Prepare Splits", type="primary"):
         set_splits(X_train, X_val, X_test, to_numpy_1d(y_train), to_numpy_1d(y_val), to_numpy_1d(y_test), feature_names)
         elapsed = time.perf_counter() - t0
         st.session_state.setdefault("last_timings", {})["Prepare Splits"] = round(elapsed, 2)
-        
+
         # Store indices for explainability (original df positions)
         if use_group_split and entity_id_final:
             st.session_state.train_indices = original_indices[train_idx].tolist()
@@ -336,6 +369,22 @@ X_test = st.session_state.X_test
 y_train = st.session_state.y_train
 y_val = st.session_state.y_val
 y_test = st.session_state.y_test
+
+# Small sample size warning
+n_train = len(X_train)
+if n_train < 50:
+    st.warning(f"""
+    **Small sample size detected:** Training set has only {n_train} samples.
+    
+    Some models may have limitations:
+    - **KNN:** n_neighbors will be limited to {n_train - 1} max
+    - **Cross-validation:** May not be reliable with very small folds
+    - **Neural Networks:** May overfit easily
+    
+    Consider simpler models (Linear/Logistic Regression, Decision Trees) for small datasets.
+    """)
+elif n_train < 100:
+    st.info(f"Training set has {n_train} samples. Some complex models may have limited performance.")
 
 # Model Selection Coach (top section) - cached for performance
 @st.cache_data
@@ -480,15 +529,29 @@ for group_name in sorted_groups:
                 with st.expander(f"{spec.name} Hyperparameters"):
                     params = {}
                     automl_best = st.session_state.get("nn_automl_best_params", {}) if model_key == "nn" else {}
+                    
+                    # Get training sample size for KNN validation
+                    n_train_samples = len(X_train) if X_train is not None else 1000
+                    
                     for param_name, param_def in spec.hyperparam_schema.items():
                         param_key = f"{model_key}_{param_name}"
                         default_val = automl_best.get(param_name, param_def['default'])
                         if param_def['type'] == 'int':
+                            # Dynamic max for n_neighbors based on training sample size
+                            max_val = param_def['max']
+                            if param_name == 'n_neighbors' and 'knn' in model_key:
+                                max_val = min(param_def['max'], n_train_samples - 1)
+                                if max_val < param_def['max']:
+                                    st.caption(f"Max limited to {max_val} (training set has {n_train_samples} samples)")
+                                # Also adjust default if needed
+                                if default_val > max_val:
+                                    default_val = max(1, min(5, max_val))
+                            
                             params[param_name] = st.number_input(
                                 param_def.get('help', param_name),
                                 min_value=param_def['min'],
-                                max_value=param_def['max'],
-                                value=default_val,
+                                max_value=max(1, max_val),  # Ensure max is at least 1
+                                value=min(default_val, max(1, max_val)),  # Ensure value doesn't exceed max
                                 key=param_key
                             )
                         elif param_def['type'] == 'float':
@@ -568,9 +631,15 @@ def optimize_model_hyperparameters(model_name, spec, X_train_transformed, y_trai
     def _objective(trial):
         # Suggest hyperparameters based on schema
         params = {}
+        n_train_samples = len(X_train)
+        
         for param_name, param_def in spec.hyperparam_schema.items():
             if param_def['type'] == 'int':
-                params[param_name] = trial.suggest_int(param_name, param_def['min'], param_def['max'])
+                max_val = param_def['max']
+                # Dynamic max for n_neighbors based on training sample size
+                if param_name == 'n_neighbors' and 'knn' in model_name:
+                    max_val = min(max_val, n_train_samples - 1)
+                params[param_name] = trial.suggest_int(param_name, param_def['min'], max(1, max_val))
             elif param_def['type'] == 'float':
                 log_scale = param_def.get('log', False)
                 min_val = param_def['min']
@@ -799,11 +868,23 @@ def _train_models(models_to_train, selected_model_params, use_optimization=False
                         st.error(f"Model spec not found for {model_name}")
                         continue
                     
-                    params = selected_model_params.get(model_name, spec.default_params)
+                    params = selected_model_params.get(model_name, spec.default_params.copy())
                     random_seed = st.session_state.get('random_seed', 42)
                     
                     # Create estimator from factory
                     estimator = spec.factory(task_type_final, random_seed)
+                    
+                    # Special handling for KNN: ensure n_neighbors <= training samples
+                    if 'knn' in model_name and 'n_neighbors' in params:
+                        n_train_samples = len(X_train_model)
+                        original_n_neighbors = params['n_neighbors']
+                        if original_n_neighbors > n_train_samples:
+                            adjusted_n_neighbors = max(1, n_train_samples - 1)
+                            params['n_neighbors'] = adjusted_n_neighbors
+                            st.warning(f"""
+                            **KNN adjusted:** n_neighbors reduced from {original_n_neighbors} to {adjusted_n_neighbors} 
+                            because training set only has {n_train_samples} samples.
+                            """)
                     
                     # Set hyperparameters
                     for param_name, param_value in params.items():
@@ -855,7 +936,7 @@ def _train_models(models_to_train, selected_model_params, use_optimization=False
                 }
                 
                 add_trained_model(model_name, model, model_results)
-                
+
                 # Store fitted estimator for explainability
                 # For explainability, we need a pipeline that can handle raw data
                 # Store both the fitted model and the preprocessing pipeline
@@ -894,14 +975,14 @@ if models_to_train:
     col1, col2 = st.columns(2)
     
     with col1:
-        train_standard = st.button("Train Models", type="primary", key="train_models_button", use_container_width=True)
+        train_standard = st.button("Train Models", type="primary", key="train_models_button", width="stretch")
     
     with col2:
         train_optimized = st.button(
             "Train Models with Hyperparameter Optimization", 
             type="secondary", 
             key="train_models_optimized_button",
-            use_container_width=True,
+            width="stretch",
             help="⚠️ This will take significantly longer as it searches for optimal hyperparameters using Optuna"
         )
     
@@ -967,13 +1048,13 @@ if st.session_state.get('trained_models'):
         st.dataframe(
             comparison_df.style.highlight_min(subset=['RMSE', 'MAE'], axis=0, color='lightgreen')
             .highlight_max(subset=['R2'], axis=0, color='lightgreen'),
-            use_container_width=True
+            width="stretch"
         )
     else:
         comparison_df = comparison_df.sort_values('Accuracy', ascending=False)
         st.dataframe(
             comparison_df.style.highlight_max(subset=['Accuracy', 'F1'], axis=0, color='lightgreen'),
-            use_container_width=True
+            width="stretch"
         )
     
     # CV results if available
@@ -989,7 +1070,7 @@ if st.session_state.get('trained_models'):
                 })
         if cv_data:
             cv_df = pd.DataFrame(cv_data)
-            st.dataframe(cv_df, use_container_width=True)
+            st.dataframe(cv_df, width="stretch")
 
             # Boxplot of CV scores
             fig = go.Figure()
@@ -1000,7 +1081,7 @@ if st.session_state.get('trained_models'):
                         name=name.upper()
                     ))
             fig.update_layout(title="CV Score Distribution", yaxis_title="Score")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             # Pairwise statistical comparison (paired t or Wilcoxon on fold-level metrics)
             from ml.eval import compare_models_paired_cv
@@ -1018,7 +1099,7 @@ if st.session_state.get('trained_models'):
                         mean_d, stat, p, tname = v["mean_delta"], v["stat"], v["p"], v["test_name"]
                         sig = " *" if (p is not None and np.isfinite(p) and p < 0.05) else ""
                         rows.append({"Model A": ma.upper(), "Model B": mb.upper(), "Mean Δ": round(mean_d, 4), "Test": tname, "p": round(p, 4) if p is not None and np.isfinite(p) else None, "Significant": "Yes" if (p is not None and np.isfinite(p) and p < 0.05) else "No"})
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                    st.dataframe(pd.DataFrame(rows), width="stretch")
 
     # Model diagnostics (one tab per model so pred-vs-actual etc. visible for all)
     st.header("Model Diagnostics")
@@ -1053,7 +1134,7 @@ if st.session_state.get('trained_models'):
 
                 if name == "nn" and results.get("history", {}).get("train_loss"):
                     st.subheader("Learning Curves")
-                    st.plotly_chart(plot_training_history(results["history"]), use_container_width=True, key=f"diag_lc_{name}")
+                    st.plotly_chart(plot_training_history(results["history"]), width="stretch", key=f"diag_lc_{name}")
                     from ml.plot_narrative import narrative_learning_curves
                     from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
                     nar = narrative_learning_curves(results["history"])
@@ -1069,7 +1150,7 @@ if st.session_state.get('trained_models'):
                     st.subheader("Predictions vs Actual")
                     st.plotly_chart(
                         plot_predictions_vs_actual(results["y_test"], results["y_test_pred"], title=f"{name.upper()} Predictions"),
-                        use_container_width=True,
+                        width="stretch",
                         key=f"diag_pva_{name}",
                     )
                     st.caption("The dashed red line (y = x) represents perfect agreement. Points closer to it indicate better predictions.")
@@ -1087,7 +1168,7 @@ if st.session_state.get('trained_models'):
                     st.subheader("Residuals")
                     st.plotly_chart(
                         plot_residuals(results["y_test"], results["y_test_pred"], title=f"{name.upper()} Residuals"),
-                        use_container_width=True,
+                        width="stretch",
                         key=f"diag_resid_{name}",
                     )
                     from ml.eval import analyze_residuals_extended
@@ -1114,7 +1195,7 @@ if st.session_state.get('trained_models'):
                     from utils.llm_ui import build_llm_context, render_interpretation_with_llm_button
                     cm = sk_confusion_matrix(results["y_test"], results["y_test_pred"])
                     fig_cm = px.imshow(cm, text_auto=True, aspect="auto", title="Confusion Matrix", labels=dict(x="Predicted", y="Actual"), color_continuous_scale="Blues")
-                    st.plotly_chart(fig_cm, use_container_width=True, key=f"diag_cm_{name}")
+                    st.plotly_chart(fig_cm, width="stretch", key=f"diag_cm_{name}")
                     cm_stats = analyze_confusion_matrix(results["y_test"], results["y_test_pred"])
                     nar = narrative_confusion_matrix(cm_stats, model_name=name)
                     if nar:

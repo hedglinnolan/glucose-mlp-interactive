@@ -1,8 +1,69 @@
 """
 Storyline and progress tracking for the educational modeling lab.
 """
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import streamlit as st
+
+# Page order for breadcrumbs and navigation (page_id, display_name, switch_path)
+PAGE_ORDER = [
+    ("Home", "Home", "app.py"),
+    ("01_Upload_and_Audit", "Upload & Audit", "pages/01_Upload_and_Audit.py"),
+    ("02_EDA", "EDA", "pages/02_EDA.py"),
+    ("03_Preprocess", "Preprocess", "pages/03_Preprocess.py"),
+    ("04_Train_and_Compare", "Train & Compare", "pages/04_Train_and_Compare.py"),
+    ("05_Explainability", "Explainability", "pages/05_Explainability.py"),
+    ("06_Report_Export", "Report Export", "pages/06_Report_Export.py"),
+    ("07_Hypothesis_Testing", "Hypothesis Testing", "pages/07_Hypothesis_Testing.py"),
+]
+
+
+def render_breadcrumb(current_page: str, step_label: Optional[str] = None) -> None:
+    """Render breadcrumb at top of page: Upload & Audit > Step 4: Data Audit"""
+    parts = []
+    for page_id, display, _ in PAGE_ORDER:
+        if page_id == current_page:
+            parts.append(display)
+            break
+        parts.append(display)
+    breadcrumb = " > ".join(parts)
+    if step_label:
+        breadcrumb += f" > {step_label}"
+    st.caption(f"**{breadcrumb}**")
+
+
+def get_prev_next_pages(current_page: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Return (prev_path, prev_label, next_path, next_label) for navigation buttons."""
+    pages = [p[0] for p in PAGE_ORDER]
+    if current_page not in pages:
+        return None, None, None, None
+    idx = pages.index(current_page)
+    prev = PAGE_ORDER[idx - 1] if idx > 0 else None
+    next_ = PAGE_ORDER[idx + 1] if idx < len(PAGE_ORDER) - 1 else None
+    prev_path, prev_label = (prev[2], prev[1]) if prev else (None, None)
+    next_path, next_label = (next_[2], next_[1]) if next_ else (None, None)
+    return prev_path, prev_label, next_path, next_label
+
+
+def render_page_navigation(current_page: str) -> None:
+    """Render Previous / Next page buttons. Uses st.switch_page when available."""
+    prev_path, prev_label, next_path, next_label = get_prev_next_pages(current_page)
+    if not prev_path and not next_path:
+        return
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col1:
+        if prev_path and prev_label:
+            if st.button(f"← {prev_label}", key="nav_prev"):
+                try:
+                    st.switch_page(prev_path)
+                except AttributeError:
+                    st.info("Use the sidebar to navigate to " + prev_label)
+    with col3:
+        if next_path and next_label:
+            if st.button(f"{next_label} →", key="nav_next"):
+                try:
+                    st.switch_page(next_path)
+                except AttributeError:
+                    st.info("Use the sidebar to navigate to " + next_label)
 
 
 class StorylinePhase:

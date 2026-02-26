@@ -66,7 +66,7 @@ The app will open in your browser at `http://localhost:8501`
 
 ## Quick Start
 
-1. **Upload Data**: Use the sidebar or Upload page to upload a CSV file
+1. **Upload Data**: Use the sidebar or Upload page to upload data files (CSV, Excel, Parquet, TSV)
 2. **Select Target & Features**: Choose what to predict and which columns to use
 3. **Explore**: Review data audit and EDA visualizations
 4. **Preprocess**: Build a preprocessing pipeline
@@ -79,7 +79,7 @@ The app will open in your browser at `http://localhost:8501`
 ### Step 1: Upload & Audit (Page 01)
 
 1. Navigate to **Upload & Audit** page
-2. Click "Upload CSV file" and select your dataset
+2. Click to upload data files (CSV, Excel, Parquet, TSV) and select your dataset
 3. Review the data audit:
    - Missing values summary
    - Data types
@@ -273,7 +273,8 @@ See repo for full layout.
 ## Known Limitations & Assumptions
 
 ### Data Assumptions
-- **CSV format**: Only CSV files are supported
+- **Supported formats**: CSV, Excel (multi-sheet), Parquet, TSV. Excel multi-sheet supported; CSV/TSV use encoding fallback (utf-8 → latin-1 → cp1252).
+- **Large files**: Files over 50 MB show a warning; loading may be slow.
 - **Numeric target**: Target variable must be numeric (for regression) or integer/categorical (for classification)
 - **Memory**: Large datasets (>100K rows) may be slow; consider sampling
 - **Missing values**: Handled via preprocessing, but extensive missingness may affect model quality

@@ -28,7 +28,12 @@ def detect_outliers(
     clean = series.dropna()
     info: Dict[str, Optional[float]] = {"method": method, "lower": None, "upper": None, "threshold": None}
 
+    # Skip non-numeric or boolean data (quantile fails on bool)
     if len(clean) < 3:
+        return mask, info
+    if clean.dtype == bool or (hasattr(clean.dtype, 'kind') and clean.dtype.kind == 'b'):
+        return mask, info
+    if not pd.api.types.is_numeric_dtype(clean):
         return mask, info
 
     if method == "iqr":

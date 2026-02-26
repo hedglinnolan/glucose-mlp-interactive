@@ -13,7 +13,7 @@ from utils.session_state import (
     init_session_state, get_data, DataConfig,
     TaskTypeDetection, CohortStructureDetection
 )
-from utils.storyline import render_progress_indicator, add_insight, get_insights_by_category
+from utils.storyline import render_progress_indicator, add_insight, get_insights_by_category, render_breadcrumb, render_page_navigation
 from data_processor import get_numeric_columns
 from ml.eda_recommender import compute_dataset_signals, recommend_eda, DatasetSignals
 from ml import eda_actions
@@ -31,6 +31,8 @@ init_session_state()
 
 st.set_page_config(page_title="EDA", page_icon=None, layout="wide")
 st.title("Exploratory Data Analysis")
+render_breadcrumb("02_EDA")
+render_page_navigation("02_EDA")
 
 # Progress indicator
 render_progress_indicator("02_EDA")
@@ -39,9 +41,21 @@ df = get_data()
 if df is None:
     st.warning("Please upload data in the Upload & Audit page first")
     st.stop()
+if len(df) == 0 or len(df.columns) == 0:
+    st.warning("Your dataset is empty. Please upload data with at least one row and one column.")
+    st.stop()
+
+# Check task mode - EDA works for both but some features are prediction-specific
+task_mode = st.session_state.get('task_mode')
+if task_mode == 'hypothesis_testing':
+    st.info("🔬 **Hypothesis Testing Mode**: EDA is available, but some prediction-specific features may be limited.")
+elif task_mode != 'prediction':
+    st.warning("Please select a task mode (Prediction or Hypothesis Testing) in the Upload & Audit page")
+    st.stop()
 
 data_config: Optional[DataConfig] = st.session_state.get('data_config')
-if data_config is None or not data_config.target_col:
+# For prediction mode, require target/features; for hypothesis testing, allow without
+if task_mode == 'prediction' and (data_config is None or not data_config.target_col):
     st.warning("Please select target and features in the Upload & Audit page first")
     st.stop()
 
@@ -108,12 +122,17 @@ with col5:
 with st.expander("Data Sufficiency Analysis", expanded=True):
     st.markdown(f"**{profile.sufficiency_narrative}**")
     
-    # Show feature-to-sample ratio context
+    # Show feature-to-sample ratio context (guard against numpy types and div-by-zero)
+    p_n = float(profile.p_n_ratio)
+    ratio_str = f"{1/p_n:.0f}" if 0 < p_n < float('inf') else "N/A"
+    n_feat = max(1, int(profile.n_features))
+    pct_num = (int(profile.n_numeric) / n_feat * 100) if n_feat else 0
+    pct_cat = (int(profile.n_categorical) / n_feat * 100) if n_feat else 0
     st.markdown(f"""
     **What this means for your models:**
-    - **Feature-to-sample ratio:** {profile.p_n_ratio:.3f} (1 feature per {1/profile.p_n_ratio:.0f} samples)
-    - **Numeric features:** {profile.n_numeric} ({profile.n_numeric/profile.n_features*100:.0f}% of total)
-    - **Categorical features:** {profile.n_categorical} ({profile.n_categorical/profile.n_features*100:.0f}% of total)
+    - **Feature-to-sample ratio:** {profile.p_n_ratio:.3f} (1 feature per {ratio_str} samples)
+    - **Numeric features:** {profile.n_numeric} ({pct_num:.0f}% of total)
+    - **Categorical features:** {profile.n_categorical} ({pct_cat:.0f}% of total)
     """)
     
     if profile.target_profile and profile.target_profile.task_type == 'classification':
@@ -161,9 +180,21 @@ def compute_signals_cached(_df: pd.DataFrame, target: str, task_type: Optional[s
         _df, target, task_type, cohort_type, entity_id, outlier_method=outlier_method
     )
 
-signals = compute_signals_cached(
-    df, target_col, task_type_final, cohort_type_final, entity_id_final, outlier_method
-)
+try:
+    signals = compute_signals_cached(
+        df, target_col, task_type_final, cohort_type_final, entity_id_final, outlier_method
+    )
+except Exception as e:
+    st.warning(f"Some signal computations were skipped due to data issues: {str(e)[:100]}")
+    from ml.eda_recommender import DatasetSignals
+    signals = DatasetSignals(
+        n_rows=len(df),
+        n_cols=len(df.columns),
+        target_name=target_col,
+        task_type_final=task_type_final,
+        cohort_type_final=cohort_type_final,
+        entity_id_final=entity_id_final
+    )
 
 # ============================================================================
 # KEY INSIGHTS PANEL
@@ -211,9 +242,9 @@ def _run_and_show(action_id: str, title: str, run_action: str):
         interp = "; ".join(findings) if findings else None
         for idx, (fig_type, fig_data) in enumerate(result.get('figures', [])):
             if fig_type == 'plotly':
-                st.plotly_chart(fig_data, use_container_width=True, key=f"upfront_plot_{action_id}_{idx}")
+                st.plotly_chart(fig_data, width="stretch", key=f"upfront_plot_{action_id}_{idx}")
             elif fig_type == 'table':
-                st.dataframe(fig_data, use_container_width=True, key=f"upfront_table_{action_id}_{idx}")
+                st.dataframe(fig_data, width="stretch", key=f"upfront_table_{action_id}_{idx}")
         if interp:
             st.markdown(f"**Interpretation:** {interp}")
             stats_summary = build_eda_full_results_context(result, action_id)
@@ -316,9 +347,9 @@ for family, tasks in FAMILY_TASKS.items():
                 interp = "; ".join(findings[:2]) if findings else None
             for idx, (fig_type, fig_data) in enumerate(result.get("figures", [])):
                 if fig_type == "plotly":
-                    st.plotly_chart(fig_data, use_container_width=True, key=f"eda_plot_{fkey}_{idx}")
+                    st.plotly_chart(fig_data, width="stretch", key=f"eda_plot_{fkey}_{idx}")
                 elif fig_type == "table":
-                    st.dataframe(fig_data, use_container_width=True, key=f"eda_table_{fkey}_{idx}")
+                    st.dataframe(fig_data, width="stretch", key=f"eda_table_{fkey}_{idx}")
             if interp:
                 st.markdown(f"**Interpretation:** {interp}")
             elif findings and result.get("figures"):
@@ -367,9 +398,9 @@ if OTHER_ACTIONS:
         interp = "; ".join(findings) if findings else None
         for idx, (fig_type, fig_data) in enumerate(result.get('figures', [])):
             if fig_type == 'plotly':
-                st.plotly_chart(fig_data, use_container_width=True, key=f"other_plot_{other_select}_{idx}")
+                st.plotly_chart(fig_data, width="stretch", key=f"other_plot_{other_select}_{idx}")
             elif fig_type == 'table':
-                st.dataframe(fig_data, use_container_width=True, key=f"other_table_{other_select}_{idx}")
+                st.dataframe(fig_data, width="stretch", key=f"other_table_{other_select}_{idx}")
         if interp:
             st.markdown(f"**Interpretation:** {interp}")
             from utils.llm_ui import build_llm_context, build_eda_full_results_context, render_interpretation_with_llm_button
@@ -422,7 +453,7 @@ st.header("Standard EDA Views")
 
 # Summary statistics
 st.subheader("Summary Statistics")
-st.dataframe(df[feature_cols + [target_col]].describe(), use_container_width=True)
+st.dataframe(df[feature_cols + [target_col]].describe(), width="stretch")
 
 # Distribution plots
 st.subheader("Distributions")
@@ -433,11 +464,11 @@ col1, col2 = st.columns(2)
 
 with col1:
     fig_hist = px.histogram(df, x=target_col, nbins=30, title=f"Distribution of {target_col}")
-    st.plotly_chart(fig_hist, use_container_width=True)
+    st.plotly_chart(fig_hist, width="stretch")
 
 with col2:
     fig_box = px.box(df, y=target_col, title=f"Box Plot of {target_col}")
-    st.plotly_chart(fig_box, use_container_width=True)
+    st.plotly_chart(fig_box, width="stretch")
 
 # Classification: class balance
 if task_type_final == 'classification':
@@ -445,7 +476,7 @@ if task_type_final == 'classification':
     class_counts = df[target_col].value_counts().sort_index()
     fig_bar = px.bar(x=class_counts.index.astype(str), y=class_counts.values,
                      title="Class Distribution", labels={'x': 'Class', 'y': 'Count'})
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.plotly_chart(fig_bar, width="stretch")
     st.info(f"Classes: {len(class_counts)} | Imbalance ratio: {class_counts.max()/class_counts.min():.2f}")
 
 # Feature distributions (top 6)
@@ -460,7 +491,7 @@ for i in range(0, n_features_show, cols_per_row):
             feat = feature_cols[i + j]
             with col:
                 fig = px.histogram(df, x=feat, nbins=20, title=feat)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
 # Target vs feature plots (collinearity heatmap is upfront)
 st.header("Target vs Features")
@@ -477,7 +508,7 @@ if task_type_final == 'regression':
                 feat = feature_cols[i + j]
                 with col:
                     fig = px.scatter(df, x=feat, y=target_col, title=f"{target_col} vs {feat}")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
 # Classification: box plots
 else:
@@ -491,6 +522,6 @@ else:
                 feat = feature_cols[i + j]
                 with col:
                     fig = px.box(df, x=target_col, y=feat, title=f"{feat} by {target_col}")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
 st.success("EDA complete. Proceed to Preprocessing page.")

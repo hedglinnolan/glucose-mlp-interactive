@@ -155,34 +155,69 @@ def compute_dataset_signals(
     # Leakage detection (simple heuristics)
     if target:
         # Check for perfect or near-perfect correlations
-        numeric_for_corr = [col for col in signals.numeric_cols if col != target]
-        if len(numeric_for_corr) > 0:
-            corr_with_target = df[numeric_for_corr + [target]].corr()[target].abs()
-            high_corr = corr_with_target[corr_with_target > 0.95].drop(target)
-            if len(high_corr) > 0:
-                signals.leakage_flags.append(f"{len(high_corr)} columns with >0.95 correlation to target")
-                signals.leakage_candidate_cols = high_corr.index.tolist()
+        # Only use columns that are truly numeric (can be converted to float)
+        numeric_for_corr = []
+        for col in signals.numeric_cols:
+            if col != target:
+                try:
+                    # Verify column is actually numeric
+                    pd.to_numeric(df[col], errors='raise')
+                    numeric_for_corr.append(col)
+                except (ValueError, TypeError):
+                    pass  # Skip columns that can't be converted
+        
+        if len(numeric_for_corr) > 0 and target in df.columns:
+            try:
+                # Also verify target can be used in correlation
+                target_numeric = pd.to_numeric(df[target], errors='coerce')
+                if target_numeric.notna().sum() > 0:
+                    corr_df = df[numeric_for_corr].copy()
+                    corr_df['_target'] = target_numeric
+                    corr_with_target = corr_df.corr()['_target'].abs()
+                    high_corr = corr_with_target[corr_with_target > 0.95].drop('_target', errors='ignore')
+                    if len(high_corr) > 0:
+                        signals.leakage_flags.append(f"{len(high_corr)} columns with >0.95 correlation to target")
+                        signals.leakage_candidate_cols = high_corr.index.tolist()
+            except Exception:
+                pass  # Skip leakage detection if correlation fails
     
     # Collinearity (sample if too many columns)
-    numeric_cols_for_corr = signals.numeric_cols
+    # Filter to truly numeric columns
+    numeric_cols_for_corr = []
+    for col in signals.numeric_cols:
+        try:
+            pd.to_numeric(df[col], errors='raise')
+            numeric_cols_for_corr.append(col)
+        except (ValueError, TypeError):
+            pass
+    
     if len(numeric_cols_for_corr) > 50:
         # Sample by variance
-        variances = df[numeric_cols_for_corr].var().sort_values(ascending=False)
-        numeric_cols_for_corr = variances.head(50).index.tolist()
+        try:
+            variances = df[numeric_cols_for_corr].var().sort_values(ascending=False)
+            numeric_cols_for_corr = variances.head(50).index.tolist()
+        except Exception:
+            numeric_cols_for_corr = numeric_cols_for_corr[:50]
     
     if len(numeric_cols_for_corr) > 1:
-        corr_matrix = df[numeric_cols_for_corr].corr().abs()
-        np.fill_diagonal(corr_matrix.values, 0)  # Remove diagonal
-        max_corr = corr_matrix.max().max()
-        signals.collinearity_summary['max_corr'] = max_corr
-        signals.collinearity_summary['high_corr_pairs'] = []
-        if max_corr > 0.85:
-            # Find high correlation pairs
-            for i, col1 in enumerate(numeric_cols_for_corr):
-                for col2 in numeric_cols_for_corr[i+1:]:
-                    corr_val = abs(df[col1].corr(df[col2]))
-                    if corr_val > 0.85:
-                        signals.collinearity_summary['high_corr_pairs'].append((col1, col2, corr_val))
+        try:
+            corr_matrix = df[numeric_cols_for_corr].corr().abs()
+            np.fill_diagonal(corr_matrix.values, 0)  # Remove diagonal
+            max_corr = corr_matrix.max().max()
+            signals.collinearity_summary['max_corr'] = max_corr
+            signals.collinearity_summary['high_corr_pairs'] = []
+            if max_corr > 0.85:
+                # Find high correlation pairs
+                for i, col1 in enumerate(numeric_cols_for_corr):
+                    for col2 in numeric_cols_for_corr[i+1:]:
+                        try:
+                            corr_val = abs(df[col1].corr(df[col2]))
+                            if corr_val > 0.85:
+                                signals.collinearity_summary['high_corr_pairs'].append((col1, col2, corr_val))
+                        except Exception:
+                            pass
+        except Exception:
+            pass  # Skip collinearity analysis if it fails
     
     # Empirical plausibility flags (NHANES percentile reference)
     reference_bundle = load_reference_bundle()

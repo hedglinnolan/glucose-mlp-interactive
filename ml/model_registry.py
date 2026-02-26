@@ -239,7 +239,7 @@ def get_registry() -> Dict[str, ModelSpec]:
         factory=_create_knn_reg,
         default_params={'n_neighbors': 5, 'weights': 'uniform'},
         hyperparam_schema={
-            'n_neighbors': {'type': 'int', 'min': 1, 'max': 50, 'default': 5, 'help': 'Number of neighbors'},
+            'n_neighbors': {'type': 'int', 'min': 1, 'max': 50, 'default': 5, 'help': 'Number of neighbors (must be ≤ sample size)'},
             'weights': {'type': 'select', 'options': ['uniform', 'distance'], 'default': 'uniform', 'help': 'Weight function'}
         },
         capabilities=ModelCapabilities(
@@ -250,7 +250,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='kernel',
             requires_scaled_numeric=True,
             recommended_for_high_dim=False,
-            notes=['Non-parametric, instance-based', 'Sensitive to feature scaling', 'Slow for large datasets']
+            notes=['Non-parametric, instance-based', 'Sensitive to feature scaling', 'n_neighbors must be ≤ training samples', 'Slow for large datasets']
         )
     )
     
@@ -261,7 +261,7 @@ def get_registry() -> Dict[str, ModelSpec]:
         factory=_create_knn_clf,
         default_params={'n_neighbors': 5, 'weights': 'uniform'},
         hyperparam_schema={
-            'n_neighbors': {'type': 'int', 'min': 1, 'max': 50, 'default': 5, 'help': 'Number of neighbors'},
+            'n_neighbors': {'type': 'int', 'min': 1, 'max': 50, 'default': 5, 'help': 'Number of neighbors (must be ≤ sample size)'},
             'weights': {'type': 'select', 'options': ['uniform', 'distance'], 'default': 'uniform', 'help': 'Weight function'}
         },
         capabilities=ModelCapabilities(
@@ -272,7 +272,7 @@ def get_registry() -> Dict[str, ModelSpec]:
             supports_shap='kernel',
             requires_scaled_numeric=True,
             recommended_for_high_dim=False,
-            notes=['Non-parametric, instance-based', 'Sensitive to feature scaling', 'Slow for large datasets']
+            notes=['Non-parametric, instance-based', 'Sensitive to feature scaling', 'n_neighbors must be ≤ training samples', 'Slow for large datasets']
         )
     )
     

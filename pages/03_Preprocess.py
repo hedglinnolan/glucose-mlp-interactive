@@ -14,7 +14,7 @@ from utils.session_state import (
     init_session_state, get_data, DataConfig, set_preprocessing_pipeline, set_preprocessing_pipelines,
     TaskTypeDetection,
 )
-from utils.storyline import render_progress_indicator, get_insights_by_category, add_insight
+from utils.storyline import render_progress_indicator, get_insights_by_category, add_insight, render_breadcrumb, render_page_navigation
 from ml.pipeline import (
     build_preprocessing_pipeline,
     get_pipeline_recipe,
@@ -35,6 +35,8 @@ init_session_state()
 
 st.set_page_config(page_title="Preprocessing", page_icon=None, layout="wide")
 st.title("Preprocessing Builder")
+render_breadcrumb("03_Preprocess")
+render_page_navigation("03_Preprocess")
 
 # Progress indicator
 render_progress_indicator("03_Preprocess")
@@ -42,6 +44,19 @@ render_progress_indicator("03_Preprocess")
 df = get_data()
 if df is None:
     st.warning("Please upload data in the Upload & Audit page first")
+    st.stop()
+if len(df) == 0 or len(df.columns) == 0:
+    st.warning("Your dataset is empty. Please upload data with at least one row and one column.")
+    st.stop()
+
+# Guardrail: Preprocessing is only for prediction mode
+task_mode = st.session_state.get('task_mode')
+if task_mode != 'prediction':
+    st.warning("⚠️ **Preprocessing is only available in Prediction mode.**")
+    st.info("""
+    Please go to the **Upload & Audit** page and select **Prediction** as your task mode.
+    Preprocessing pipelines are used to prepare data for machine learning models.
+    """)
     st.stop()
 
 data_config: Optional[DataConfig] = st.session_state.get('data_config')
@@ -526,10 +541,10 @@ if pipelines_by_model:
                 _ba, _aa = st.columns(2)
                 with _ba:
                     st.subheader("Before")
-                    st.dataframe(_before, use_container_width=True)
+                    st.dataframe(_before, width="stretch")
                 with _aa:
                     st.subheader("After")
-                    st.dataframe(preview_df.head(100), use_container_width=True)
+                    st.dataframe(preview_df.head(100), width="stretch")
                 csv_bytes = preview_df.to_csv(index=False).encode()
                 st.download_button(
                     "Download as CSV",

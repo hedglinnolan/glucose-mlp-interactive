@@ -53,3 +53,7 @@ Thumbs.db
 *.pth
 *.joblib
 *.pkl
+
+# Local data and debug
+datasets.db
+debug*.log

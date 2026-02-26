@@ -106,6 +106,13 @@ def init_session_state():
         'data_config': DataConfig(),
         'data_audit': None,
         
+        # Project-based dataset management
+        'task_mode': None,  # 'prediction' | 'hypothesis_testing'
+        'datasets_registry': {},  # Dict mapping dataset_id -> DataFrame
+        'working_table': None,  # The merged/active DataFrame for analysis
+        'merge_steps': [],  # List of merge operations
+        'last_merge_columns': [],  # Columns from the last merge result
+        
         # Detection and triage
         'task_type_detection': TaskTypeDetection(),
         'cohort_structure_detection': CohortStructureDetection(),
@@ -157,6 +164,8 @@ def init_session_state():
         'data_filename': None,  # Track filename for uploads or dataset label
         'dataset_id': None,  # Incrementing dataset identifier
         'dataset_history': [],  # Archive of replaced datasets (metadata only)
+        'has_completed_tour': False,  # Guided tour dismissed/completed
+        'show_guided_tour': False,  # Expand guided tour in sidebar
     }
     
     for key, value in defaults.items():
@@ -181,6 +190,8 @@ def reset_data_dependent_state():
     st.session_state.data_audit = None
     st.session_state.task_type_detection = TaskTypeDetection()
     st.session_state.cohort_structure_detection = CohortStructureDetection()
+    # Note: task_mode and datasets_registry are NOT reset here
+    # as they are workflow-level, not dataset-specific
 
     st.session_state.preprocessing_pipeline = None
     st.session_state.preprocessing_config = None

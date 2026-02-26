@@ -5,22 +5,154 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
+import io
+
+
+def detect_file_type(filename: str) -> str:
+    """Detect file type from filename extension."""
+    filename_lower = filename.lower()
+    if filename_lower.endswith('.csv'):
+        return 'csv'
+    elif filename_lower.endswith(('.xlsx', '.xls')):
+        return 'excel'
+    elif filename_lower.endswith('.parquet'):
+        return 'parquet'
+    elif filename_lower.endswith(('.tsv', '.txt')):
+        return 'tsv'
+    else:
+        # Default to CSV for unknown types
+        return 'csv'
+
+
+def transpose_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Transpose a DataFrame (rows ↔ columns)."""
+    return df.T
+
+
+def load_csv(file: Union[str, io.BytesIO], encoding: Optional[str] = None) -> pd.DataFrame:
+    """Load CSV file. Tries utf-8 first, then latin-1 on failure."""
+    encodings = [encoding] if encoding else ['utf-8', 'latin-1', 'cp1252']
+    last_err = None
+    for enc in encodings:
+        try:
+            if isinstance(file, str):
+                df = pd.read_csv(file, encoding=enc)
+            else:
+                file.seek(0)
+                df = pd.read_csv(file, encoding=enc)
+            return df
+        except Exception as e:
+            last_err = e
+    raise ValueError(f"Error loading CSV: {str(last_err)}")
+
+
+def load_excel(file: Union[str, io.BytesIO], sheet_name: Optional[Union[str, int]] = 0) -> pd.DataFrame:
+    """Load Excel file."""
+    try:
+        if isinstance(file, str):
+            df = pd.read_excel(file, sheet_name=sheet_name)
+        else:
+            df = pd.read_excel(file, sheet_name=sheet_name)
+        return df
+    except Exception as e:
+        raise ValueError(f"Error loading Excel: {str(e)}")
+
+
+def load_parquet(file: Union[str, io.BytesIO]) -> pd.DataFrame:
+    """Load Parquet file."""
+    try:
+        if isinstance(file, str):
+            df = pd.read_parquet(file)
+        else:
+            df = pd.read_parquet(file)
+        return df
+    except Exception as e:
+        raise ValueError(f"Error loading Parquet: {str(e)}")
+
+
+def load_tsv(file: Union[str, io.BytesIO], encoding: Optional[str] = None) -> pd.DataFrame:
+    """Load TSV (tab-separated) file. Tries utf-8 first, then latin-1 on failure."""
+    encodings = [encoding] if encoding else ['utf-8', 'latin-1', 'cp1252']
+    last_err = None
+    for enc in encodings:
+        try:
+            if isinstance(file, str):
+                df = pd.read_csv(file, sep='\t', encoding=enc)
+            else:
+                file.seek(0)
+                df = pd.read_csv(file, sep='\t', encoding=enc)
+            return df
+        except Exception as e:
+            last_err = e
+    raise ValueError(f"Error loading TSV: {str(last_err)}")
+
+
+def load_tabular_data(
+    file: Union[str, io.BytesIO],
+    filename: Optional[str] = None,
+    transpose: bool = False,
+    excel_sheet: Optional[Union[str, int]] = 0
+) -> pd.DataFrame:
+    """
+    Load tabular data from various formats (CSV, Excel, Parquet, TSV).
+    
+    Args:
+        file: File path or file-like object
+        filename: Original filename (used to detect file type if file is BytesIO)
+        transpose: Whether to transpose the data after loading
+        excel_sheet: Sheet name or index for Excel files (default: first sheet)
+    
+    Returns:
+        Loaded DataFrame, optionally transposed
+    """
+    # Detect file type
+    if filename:
+        file_type = detect_file_type(filename)
+    elif isinstance(file, str):
+        file_type = detect_file_type(file)
+    else:
+        # Default to CSV if we can't determine
+        file_type = 'csv'
+    
+    # Load based on file type
+    if file_type == 'csv':
+        df = load_csv(file)
+    elif file_type == 'excel':
+        df = load_excel(file, sheet_name=excel_sheet)
+    elif file_type == 'parquet':
+        df = load_parquet(file)
+    elif file_type == 'tsv':
+        df = load_tsv(file)
+    else:
+        # Fallback to CSV
+        df = load_csv(file)
+    
+    # Transpose if requested
+    if transpose:
+        df = transpose_dataframe(df)
+    
+    return df
 
 
 def load_and_preview_csv(file_path: str, n_rows: int = 5) -> pd.DataFrame:
-    """Load CSV and return preview."""
-    try:
-        df = pd.read_csv(file_path)
-        return df
-    except Exception as e:
-        raise ValueError(f"Error loading CSV: {str(e)}")
+    """Load CSV and return preview. (Legacy function for backward compatibility)"""
+    return load_csv(file_path)
 
 
 def get_numeric_columns(df: pd.DataFrame) -> List[str]:
-    """Get list of numeric column names (at least one non-null)."""
+    """Get list of numeric column names (at least one non-null, truly numeric)."""
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    return [col for col in numeric_cols if df[col].notna().sum() > 0]
+    valid_numeric = []
+    for col in numeric_cols:
+        if df[col].notna().sum() > 0:
+            # Double-check that the column is truly numeric (no string values)
+            try:
+                pd.to_numeric(df[col].dropna(), errors='raise')
+                valid_numeric.append(col)
+            except (ValueError, TypeError):
+                pass  # Skip columns with non-numeric values
+    return valid_numeric
 
 
 def get_categorical_columns(df: pd.DataFrame) -> List[str]:
@@ -62,19 +194,30 @@ def prepare_data(
     X = df[feature_cols].copy()
     y = df[target_col].copy()
     
-    # Handle missing values
+    # Handle missing values - target: drop rows (categorical) or median (numeric)
+    target_is_categorical = y.dtype in ['object', 'category', 'bool'] or (
+        hasattr(y.dtype, 'kind') and y.dtype.kind in ('O', 'b')
+    )
+    if target_is_categorical:
+        mask = y.notna()
+        X = X[mask].reset_index(drop=True)
+        y = y[mask].reset_index(drop=True)
+    else:
+        y = y.fillna(y.median())
+    
     X = X.fillna(X.median())
-    y = y.fillna(y.median())
     
     # Convert to numeric, coercing errors to NaN
     for col in X.columns:
         X[col] = pd.to_numeric(X[col], errors='coerce')
-    y = pd.to_numeric(y, errors='coerce')
+    if not target_is_categorical:
+        y = pd.to_numeric(y, errors='coerce')
     
-    # Drop rows with NaN in target
-    mask = y.notna()
-    X = X[mask].reset_index(drop=True)
-    y = y[mask].reset_index(drop=True)
+    # Drop rows with NaN in target (numeric only; categorical already dropped)
+    if not target_is_categorical:
+        mask = y.notna()
+        X = X[mask].reset_index(drop=True)
+        y = y[mask].reset_index(drop=True)
     
     # Drop rows with all NaN features
     mask = X.notna().any(axis=1)

@@ -1,11 +1,11 @@
 """
 Page 01: Upload and Data Audit
-Validates dataset and provides audit summary.
+Project-based data management with intelligent merging.
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Any
 import logging
 from datetime import datetime
 
@@ -16,53 +16,91 @@ from utils.session_state import (
 from utils.datasets import get_builtin_datasets
 from utils.reconcile import reconcile_target_features
 from utils.state_reconcile import reconcile_state_with_df
-from utils.storyline import render_progress_indicator
-from data_processor import load_and_preview_csv, get_numeric_columns, get_selectable_columns
+from utils.storyline import render_progress_indicator, render_breadcrumb, render_page_navigation
+from utils.dataset_db import (
+    get_db, detect_common_columns, suggest_join_keys, execute_merge
+)
+from utils.column_utils import make_unique_columns
+from data_processor import (
+    load_tabular_data, get_numeric_columns, get_selectable_columns,
+    detect_file_type
+)
 from ml.triage import detect_task_type, detect_cohort_structure
 from ml.eda_recommender import compute_dataset_signals
 
 logger = logging.getLogger(__name__)
 
-# Re-upload handling helpers
-def _next_dataset_id() -> int:
-    current = st.session_state.get("dataset_id")
-    return 1 if current is None else current + 1
+
+# =============================================================================
+# HELPER: Visual Schema Diagram
+# =============================================================================
+def render_schema_diagram(dataframes: Dict[str, pd.DataFrame], common_cols: Dict[str, List[str]]):
+    """
+    Render a visual schema diagram showing datasets and their relationships.
+    Similar to Microsoft Access relationship view.
+    """
+    st.markdown("#### Data Schema")
+    st.caption("Visual overview of your datasets and how they can connect")
+    
+    # Create columns for each dataset (max 4 per row)
+    n_datasets = len(dataframes)
+    cols_per_row = min(n_datasets, 3)
+    
+    dataset_names = list(dataframes.keys())
+    
+    # Show datasets as "cards"
+    cols = st.columns(cols_per_row)
+    
+    for i, (name, df) in enumerate(dataframes.items()):
+        col_idx = i % cols_per_row
+        
+        with cols[col_idx]:
+            # Dataset "card"
+            st.markdown(f"""
+            <div style="border: 2px solid #4CAF50; border-radius: 8px; padding: 10px; margin: 5px 0; background-color: #f8f9fa;">
+                <div style="font-weight: bold; color: #1a73e8; border-bottom: 1px solid #ddd; padding-bottom: 5px; margin-bottom: 8px;">
+                    {name}
+                </div>
+                <div style="font-size: 0.85em; color: #666;">
+                    {df.shape[0]:,} rows × {df.shape[1]} columns
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Show columns (highlight common ones)
+            common_col_names = set(common_cols.keys())
+            
+            # Show first few columns
+            max_cols_shown = 8
+            shown_cols = list(df.columns)[:max_cols_shown]
+            
+            for col in shown_cols:
+                if col in common_col_names:
+                    # Highlight columns that appear in multiple datasets
+                    st.markdown(f"<span style='color: #1a73e8; font-weight: bold;'>🔗 {col}</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<span style='color: #666; font-size: 0.9em;'>○ {col}</span>", unsafe_allow_html=True)
+            
+            if len(df.columns) > max_cols_shown:
+                st.caption(f"... +{len(df.columns) - max_cols_shown} more columns")
+    
+    # Show relationship summary
+    if common_cols:
+        st.markdown("---")
+        st.markdown("**Potential Connections (🔗 = shared columns):**")
+        for col, ds_list in common_cols.items():
+            if len(ds_list) >= 2:
+                st.markdown(f"• `{col}` connects: {' ↔ '.join(ds_list)}")
+    else:
+        st.warning("No shared columns detected. Consider transposing one of your datasets.")
 
 
-def _archive_current_dataset(reason: str):
-    existing = get_data()
-    if existing is None:
-        return
-    history = st.session_state.get("dataset_history", [])
-    history.append({
-        "dataset_id": st.session_state.get("dataset_id"),
-        "data_source": st.session_state.get("data_source"),
-        "data_filename": st.session_state.get("data_filename"),
-        "reason": reason,
-        "rows": len(existing),
-        "columns": list(existing.columns),
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-    })
-    st.session_state.dataset_history = history
-
-
-def _choose_replace_action(key: str, new_label: str) -> str:
-    existing_label = st.session_state.get("data_filename") or st.session_state.get("data_source")
-    if existing_label:
-        st.info(f"Current dataset: {existing_label}")
-    if existing_label and new_label and new_label != existing_label:
-        st.warning("New dataset name differs from the current one.")
-    return st.radio(
-        "Choose how to handle the existing dataset:",
-        ["Overwrite existing dataset", "Create a new version", "Cancel"],
-        index=0,
-        key=key,
-        help="Overwrite replaces the current dataset. Versioning archives the current dataset metadata before replacing it.",
-        horizontal=True
-    )
 
 # Initialize session state
 init_session_state()
+
+# Initialize database
+db = get_db()
 
 st.set_page_config(
     page_title="Upload & Audit",
@@ -70,588 +108,1670 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Upload & Data Audit")
+st.title("Data Upload & Project Management")
+render_breadcrumb("01_Upload_and_Audit")
+render_page_navigation("01_Upload_and_Audit")
 
 # Progress indicator
 render_progress_indicator("01_Upload_and_Audit")
 
-# Built-in datasets
-st.header("Built-in Datasets (for Testing)")
-dataset_options = ['None (Upload CSV)'] + list(get_builtin_datasets().keys())
-selected_dataset = st.selectbox(
-    "Or try a built-in dataset:",
-    dataset_options,
-    key="upload_dataset_select",
-    help="Select a built-in educational dataset to explore the app"
-)
-
-df_builtin = None
-if selected_dataset != 'None (Upload CSV)':
-    # Check if data already exists
-    existing_data = get_data()
-    replace_action = None
-    if existing_data is not None:
-        replace_action = _choose_replace_action("replace_dataset_action", selected_dataset)
+# ============================================================================
+# DATA PERSISTENCE INFO & MANAGEMENT (Sidebar)
+# ============================================================================
+with st.sidebar:
+    st.subheader("Data Management")
     
-    if st.button("Generate Dataset", key="generate_dataset_button"):
-        if existing_data is not None and replace_action == "Cancel":
-            st.info("Dataset replacement cancelled.")
-        else:
-            if existing_data is not None and replace_action == "Create a new version":
-                _archive_current_dataset("versioned")
+    # Get database stats
+    db_stats = db.get_database_stats()
+    
+    # Show current state
+    st.caption(f"Projects: {db_stats['n_projects']} | Datasets: {db_stats['n_datasets']}")
+    
+    with st.expander("About Your Data", expanded=False):
+        st.markdown("""
+        **What gets saved:**
+        - Project names and settings
+        - Dataset metadata (names, columns, types)
+        - Merge configurations
+        
+        **What doesn't get saved:**
+        - The actual data files (you'll need to re-upload after refresh)
+        - Analysis results and trained models
+        
+        **When you refresh or close the app:**
+        - Your projects remain saved
+        - You'll need to re-upload your data files
+        - Any unsaved analysis work is lost
+        
+        **Tip:** Complete your analysis in one session, or use the Report Export to save your results.
+        """)
+    
+    # Quick actions
+    st.markdown("**Quick Actions:**")
+    
+    # Check current state
+    has_working_table = st.session_state.get('working_table') is not None
+    has_analysis_config = st.session_state.get('data_config') is not None and st.session_state.get('data_config').target_col is not None
+    
+    # Modify Data button - allows going back to change data setup
+    if has_working_table or has_analysis_config:
+        if st.button("Modify Data Setup", key="modify_data", help="Go back to change your data or merge settings"):
+            # Clear analysis config but keep working table
+            st.session_state.data_config = DataConfig()
+            st.session_state.task_mode = None
+            st.session_state.task_type_detection = TaskTypeDetection()
+            # Clear trained models and preprocessing
+            st.session_state.pop('trained_models', None)
+            st.session_state.pop('model_results', None)
+            st.session_state.pop('preprocessing_pipeline', None)
+            st.session_state.pop('X_train', None)
+            st.info("Analysis config cleared. You can now modify your data setup.")
+            st.rerun()
+        
+        if st.button("Change Merge Setup", key="change_merge", help="Go back to re-merge your datasets"):
+            st.session_state.pop('working_table', None)
+            st.session_state.pop('merge_preview', None)
+            st.session_state.pop('merge_config', None)
+            st.session_state.pop('merge_steps', None)
+            st.session_state.pop('last_merge_columns', None)
+            st.session_state.pop('transposed_for_merge', None)
+            st.session_state.data_config = DataConfig()
+            st.session_state.task_mode = None
             reset_data_dependent_state()
-            generator = get_builtin_datasets()[selected_dataset]
-            df_builtin = generator(random_state=st.session_state.get('random_seed', 42))
-            set_data(df_builtin)
-            dataset_id = _next_dataset_id()
-            st.session_state.dataset_id = dataset_id
-            st.session_state.data_filename = selected_dataset
-            st.session_state.data_source = f"Built-in: {selected_dataset} (v{dataset_id})"
-            reconcile_state_with_df(df_builtin, st.session_state)
-            st.success(f"Generated {len(df_builtin)} rows")
+            st.info("Merge cleared. You can now re-configure your data merge.")
+            st.rerun()
+    
+    st.divider()
+    
+    # Data management options
+    with st.expander("Reset Options", expanded=False):
+        st.warning("These actions cannot be undone!")
+        
+        if not st.session_state.get('confirm_clear_session'):
+            if st.button("Clear Current Session", key="clear_session", help="Clears uploaded data but keeps project structure"):
+                st.session_state['confirm_clear_session'] = True
+        
+        if st.session_state.get('confirm_clear_session'):
+            st.error("Are you sure? This will clear all uploaded data from this session (project structure is kept).")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Yes, Clear Session", type="primary", key="confirm_clear_yes"):
+                    st.session_state.pop('datasets_registry', None)
+                    st.session_state.pop('working_table', None)
+                    st.session_state.pop('merge_steps', None)
+                    st.session_state.pop('transposed_for_merge', None)
+                    st.session_state.pop('confirm_clear_session', None)
+                    reset_data_dependent_state()
+                    st.success("Session cleared! Re-upload your files to continue.")
+                    st.rerun()
+            with c2:
+                if st.button("Cancel", key="confirm_clear_no"):
+                    st.session_state.pop('confirm_clear_session', None)
+                    st.rerun()
+        
+        st.divider()
+        
+        if not st.session_state.get('confirm_reset'):
+            if st.button("Delete All Projects & Data", key="reset_all", type="secondary"):
+                st.session_state['confirm_reset'] = True
+        
+        if st.session_state.get('confirm_reset'):
+            st.error("Are you sure? This will delete ALL projects and dataset records.")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Yes, Delete Everything", type="primary", key="confirm_yes"):
+                    db.reset_all_data()
+                    st.session_state.pop('datasets_registry', None)
+                    st.session_state.pop('working_table', None)
+                    st.session_state.pop('merge_steps', None)
+                    st.session_state.pop('transposed_for_merge', None)
+                    st.session_state.pop('confirm_reset', None)
+                    reset_data_dependent_state()
+                    st.success("All data cleared!")
+                    st.rerun()
+            with col2:
+                if st.button("Cancel", key="confirm_no"):
+                    st.session_state.pop('confirm_reset', None)
+                    st.rerun()
+
+# ============================================================================
+# SECTION 1: PROJECT MANAGEMENT
+# ============================================================================
+st.header("Step 1: Select or Create Project")
+st.caption("Projects group related datasets that you want to merge and analyze together.")
+
+all_projects = db.get_all_projects()
+active_project = db.get_active_project()
+
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    if all_projects:
+        # Use unique display names (append id when duplicates exist)
+        from collections import Counter
+        name_counts = Counter(p['name'] for p in all_projects)
+        project_options = []
+        for p in all_projects:
+            display_name = f"{p['name']} (id:{p['id']})" if name_counts[p['name']] > 1 else p['name']
+            project_options.append((display_name, p['id']))
+        
+        option_labels = [opt[0] for opt in project_options]
+        option_ids = [opt[1] for opt in project_options]
+        
+        # Determine current selection (safe against missing/stale active project)
+        if active_project and active_project['id'] in option_ids:
+            current_idx = option_ids.index(active_project['id'])
+        else:
+            current_idx = 0
+        
+        selected_project_name = st.selectbox(
+            "Select Existing Project",
+            options=option_labels,
+            index=current_idx,
+            key="project_selection"
+        )
+        selected_project_id = option_ids[option_labels.index(selected_project_name)]
+        
+        if selected_project_id != (active_project['id'] if active_project else None):
+            if st.button("Switch to This Project", key="switch_project"):
+                db.set_active_project(selected_project_id)
+                reset_data_dependent_state()
+                st.session_state.pop('datasets_registry', None)
+                st.session_state.pop('working_table', None)
+                st.rerun()
+    else:
+        st.info("No projects yet. Create your first project below.")
+
+with col2:
+    with st.expander("Create New Project", expanded=not all_projects):
+        new_project_name = st.text_input("Project Name", key="new_project_name")
+        new_project_desc = st.text_area("Description (optional)", key="new_project_desc", height=68)
+        
+        if st.button("Create Project", key="create_project", type="primary"):
+            if new_project_name:
+                existing_names = [p['name'] for p in all_projects] if all_projects else []
+                if new_project_name.strip() in existing_names:
+                    st.error(f"A project named '{new_project_name}' already exists. Choose a different name.")
+                else:
+                    project_id = db.create_project(new_project_name.strip(), new_project_desc)
+                    reset_data_dependent_state()
+                    st.session_state.pop('datasets_registry', None)
+                    st.session_state.pop('working_table', None)
+                    st.success(f"Project '{new_project_name}' created!")
+                    st.rerun()
+            else:
+                st.error("Please enter a project name")
+
+# Get current active project
+active_project = db.get_active_project()
+
+if not active_project:
+    st.warning("Please create or select a project to continue.")
+    st.stop()
+
+st.success(f"**Active Project:** {active_project['name']}")
+
+# ============================================================================
+# SECTION 2: UPLOAD FILES TO PROJECT
+# ============================================================================
+st.markdown("---")
+st.header("Step 2: Upload Files to Project")
+st.caption("Upload all related data files. You can merge them in the next step.")
+
+# Initialize datasets registry for this project
+if 'datasets_registry' not in st.session_state:
+    st.session_state.datasets_registry = {}
+
+# Show existing datasets in project
+project_datasets = db.get_project_datasets(active_project['id'])
+
+if project_datasets:
+    st.subheader("Datasets in This Project")
+    
+    # Check which datasets are in memory vs only in DB (orphaned after refresh)
+    datasets_in_memory = []
+    datasets_need_reupload = []
+    
+    for d in project_datasets:
+        in_memory = d['id'] in st.session_state.datasets_registry
+        d['in_memory'] = in_memory
+        if in_memory:
+            datasets_in_memory.append(d)
+        else:
+            datasets_need_reupload.append(d)
+    
+    # Show datasets status
+    dataset_summary = []
+    for d in project_datasets:
+        status = "Ready" if d['in_memory'] else "Needs Re-upload"
+        dataset_summary.append({
+            'Name': d['name'],
+            'Filename': d['filename'],
+            'Rows': f"{d['shape_rows']:,}",
+            'Columns': d['shape_cols'],
+            'Status': status
+        })
+    
+    st.dataframe(pd.DataFrame(dataset_summary), width="stretch", hide_index=True)
+    
+    # Warning if some datasets need re-upload
+    if datasets_need_reupload:
+        st.warning(f"""
+        **{len(datasets_need_reupload)} dataset(s) need to be re-uploaded.**
+        
+        This happens when you refresh the page or return to a previous session. 
+        The project structure is saved, but you need to upload the actual data files again.
+        
+        **Options:**
+        1. Re-upload the same files below (they'll match to existing records)
+        2. Clear the old records and start fresh
+        """)
+        
+        if st.button("Clear old dataset records", key="clear_orphaned"):
+            for d in datasets_need_reupload:
+                db.delete_dataset(d['id'])
+            st.success("Cleared old records. You can now upload fresh files.")
+            st.rerun()
+    
+    # Dataset actions
+    with st.expander("Manage Datasets"):
+        delete_dataset = st.selectbox(
+            "Select dataset to delete",
+            options=[''] + [d['name'] for d in project_datasets],
+            key="delete_dataset_select"
+        )
+        if delete_dataset and st.button("Delete Selected Dataset", type="secondary"):
+            for d in project_datasets:
+                if d['name'] == delete_dataset:
+                    db.delete_dataset(d['id'])
+                    if d['id'] in st.session_state.datasets_registry:
+                        del st.session_state.datasets_registry[d['id']]
+                    st.success(f"Deleted '{delete_dataset}'")
+                    st.rerun()
 
 # File upload
-st.header("📤 Upload CSV File")
-uploaded_file = st.file_uploader(
-    "Upload CSV file",
-    type=['csv'],
-    key="csv_uploader",
-    help="Upload your dataset as a CSV file"
+st.subheader("Upload New Files")
+
+uploaded_files = st.file_uploader(
+    "Upload data files (CSV, Excel, Parquet, TSV)",
+    type=['csv', 'xlsx', 'xls', 'parquet', 'tsv', 'txt'],
+    accept_multiple_files=True,
+    key="file_uploader"
 )
 
-# Get current data from session state
-df = get_data()
+MAX_FILE_SIZE_MB = 50
 
-# Handle new uploads
-if uploaded_file is not None:
-    existing_data = get_data()
-    replace_action = None
-    if existing_data is not None:
-        replace_action = _choose_replace_action("replace_upload_action", uploaded_file.name)
-    
-    if existing_data is None or replace_action != "Cancel":
-        try:
-            with st.spinner("Loading data..."):
-                df = load_and_preview_csv(uploaded_file)
-                if existing_data is not None and replace_action == "Create a new version":
-                    _archive_current_dataset("versioned")
-                if existing_data is not None:
-                    reset_data_dependent_state()
-                set_data(df)
-                dataset_id = _next_dataset_id()
-                st.session_state.dataset_id = dataset_id
-                st.session_state.data_filename = uploaded_file.name
-                st.session_state.data_source = f"Uploaded CSV: {uploaded_file.name} (v{dataset_id})"
-                reconcile_state_with_df(df, st.session_state)
-                st.success(f"Loaded {len(df):,} rows × {len(df.columns)} columns")
-        except Exception as e:
-            st.error(f"Error loading data: {e}")
-            logger.exception(e)
-            df = None
-    elif existing_data is not None and replace_action == "Cancel":
-        st.info("Upload ignored. Existing dataset preserved.")
+if uploaded_files:
+    for file_idx, uploaded_file in enumerate(uploaded_files):
+        file_type = detect_file_type(uploaded_file.name)
+        file_key = f"{uploaded_file.name.replace('.', '_').replace(' ', '_')}_{file_idx}"
+        
+        with st.expander(f"Configure: {uploaded_file.name}", expanded=True):
+            try:
+                # Large file warning
+                file_size_mb = uploaded_file.size / (1024 * 1024)
+                if file_size_mb > MAX_FILE_SIZE_MB:
+                    st.warning(
+                        f"**{uploaded_file.name}** is {file_size_mb:.1f} MB (limit: {MAX_FILE_SIZE_MB} MB). "
+                        "Large files may be slow to load."
+                    )
+                    load_anyway = st.checkbox("Load anyway", key=f"load_large_{file_key}")
+                    if not load_anyway:
+                        continue
 
-# Use latest from session state (updated by built-in or upload)
-df = get_data()
-if df is None and df_builtin is not None:
-    df = df_builtin
-
-if df is not None:
-    try:
-        
-        # Data preview
-        with st.expander("Data Preview", expanded=True):
-            st.dataframe(df.head(20), use_container_width=True)
-            st.info(f"**Shape:** {df.shape[0]:,} rows × {df.shape[1]} columns")
-        
-        # Data Audit
-        st.header("Data Audit")
-        
-        audit_results = {}
-        
-        # Missingness
-        st.subheader("Missing Values")
-        missing_counts = df.isnull().sum()
-        missing_pct = (missing_counts / len(df)) * 100
-        missing_df = pd.DataFrame({
-            'Column': missing_counts.index,
-            'Missing Count': missing_counts.values,
-            'Missing %': missing_pct.values
-        })
-        missing_df = missing_df[missing_df['Missing Count'] > 0].sort_values('Missing %', ascending=False)
-        
-        if len(missing_df) > 0:
-            st.dataframe(missing_df, use_container_width=True)
-            audit_results['missing'] = missing_df.to_dict('records')
-        else:
-            st.success("No missing values found")
-            audit_results['missing'] = []
-        
-        # Data types
-        st.subheader("Data Types")
-        dtype_df = pd.DataFrame({
-            'Column': df.dtypes.index,
-            'Type': df.dtypes.values.astype(str),
-            'Non-null Count': df.count().values
-        })
-        st.dataframe(dtype_df, use_container_width=True)
-        audit_results['dtypes'] = dtype_df.to_dict('records')
-        
-        # Duplicates
-        st.subheader("Duplicate Rows")
-        n_duplicates = df.duplicated().sum()
-        if n_duplicates > 0:
-            st.warning(f"Found {n_duplicates:,} duplicate rows ({n_duplicates/len(df)*100:.2f}%)")
-            audit_results['duplicates'] = n_duplicates
-        else:
-            st.success("No duplicate rows found")
-            audit_results['duplicates'] = 0
-        
-        # Constant columns
-        st.subheader("Constant Columns")
-        constant_cols = []
-        for col in df.columns:
-            if df[col].nunique() <= 1:
-                constant_cols.append(col)
-        
-        if constant_cols:
-            st.warning(f"Found {len(constant_cols)} constant columns: {', '.join(constant_cols)}")
-            audit_results['constant_cols'] = constant_cols
-        else:
-            st.success("No constant columns found")
-            audit_results['constant_cols'] = []
-        
-        # High cardinality categoricals
-        st.subheader("High Cardinality Categoricals")
-        high_card_cols = []
-        for col in df.select_dtypes(include=['object']).columns:
-            if df[col].nunique() > len(df) * 0.5:  # More than 50% unique values
-                high_card_cols.append({
-                    'Column': col,
-                    'Unique Values': df[col].nunique(),
-                    '% Unique': (df[col].nunique() / len(df)) * 100
-                })
-        
-        if high_card_cols:
-            st.warning(f"Found {len(high_card_cols)} high-cardinality columns")
-            st.dataframe(pd.DataFrame(high_card_cols), use_container_width=True)
-            audit_results['high_cardinality'] = high_card_cols
-        else:
-            st.success("No high-cardinality categorical columns")
-            audit_results['high_cardinality'] = []
-        
-        # Target leakage candidates (correlation with potential targets)
-        st.subheader("Target Leakage Analysis")
-        numeric_cols = get_numeric_columns(df)
-        if len(numeric_cols) > 1:
-            corr_matrix = df[numeric_cols].corr().abs()
-            # Find columns highly correlated with others (potential leakage)
-            leakage_candidates = []
-            for col in numeric_cols:
-                max_corr = corr_matrix[col].drop(col).max()
-                if max_corr > 0.95:  # Very high correlation
-                    correlated_with = corr_matrix[col].drop(col).idxmax()
-                    leakage_candidates.append({
-                        'Column': col,
-                        'Correlated With': correlated_with,
-                        'Correlation': max_corr
-                    })
-            
-            if leakage_candidates:
-                st.warning(f"Found {len(leakage_candidates)} potential leakage candidates")
-                st.dataframe(pd.DataFrame(leakage_candidates), use_container_width=True)
-                audit_results['leakage_candidates'] = leakage_candidates
-            else:
-                st.success("No obvious target leakage candidates")
-                audit_results['leakage_candidates'] = []
-        else:
-            audit_results['leakage_candidates'] = []
-        
-        # ID-like fields (high cardinality numeric columns)
-        st.subheader("ID-like Fields")
-        id_like_cols = []
-        for col in numeric_cols:
-            if df[col].nunique() == len(df) and df[col].dtype in [np.int64, np.int32]:
-                id_like_cols.append(col)
-        
-        if id_like_cols:
-            st.warning(f"Found {len(id_like_cols)} ID-like columns: {', '.join(id_like_cols)}")
-            audit_results['id_like_cols'] = id_like_cols
-        else:
-            st.success("No obvious ID-like columns")
-            audit_results['id_like_cols'] = []
-        
-        # Store audit results
-        st.session_state.data_audit = audit_results
-        
-        # Run cohort structure detection (once when data is loaded)
-        if 'cohort_structure_detection' not in st.session_state or st.session_state.cohort_structure_detection.detected is None:
-            with st.spinner("Detecting cohort structure..."):
-                cohort_result = detect_cohort_structure(df)
-                cohort_detection = CohortStructureDetection(
-                    detected=cohort_result['detected'],
-                    confidence=cohort_result['confidence'],
-                    reasons=cohort_result['reasons'],
-                    entity_id_candidates=cohort_result['entity_id_candidates'],
-                    entity_id_detected=cohort_result['entity_id_detected'],
-                    time_column_candidates=cohort_result['time_column_candidates']
-                )
-                st.session_state.cohort_structure_detection = cohort_detection
-        
-        # Recommendations
-        st.header("Recommendations")
-        recommendations = []
-        
-        if audit_results['missing']:
-            recommendations.append("Consider imputing missing values in preprocessing")
-        if audit_results['duplicates'] > 0:
-            recommendations.append("Consider removing duplicate rows")
-        if audit_results['constant_cols']:
-            recommendations.append(f"Remove constant columns: {', '.join(audit_results['constant_cols'])}")
-        if audit_results['id_like_cols']:
-            recommendations.append(f"Exclude ID-like columns from features: {', '.join(audit_results['id_like_cols'])}")
-        if audit_results['leakage_candidates']:
-            recommendations.append("Review highly correlated columns for potential target leakage")
-        
-        if recommendations:
-            for i, rec in enumerate(recommendations, 1):
-                st.info(f"{i}. {rec}")
-        else:
-            st.success("No major issues detected. Data looks good!")
-        
-        # Target and feature selection
-        st.header("Select Target & Features")
-        numeric_cols_sel, categorical_cols_sel = get_selectable_columns(df)
-        selectable_flat = numeric_cols_sel + categorical_cols_sel
-
-        # Get existing config or initialize
-        existing_config = st.session_state.get('data_config')
-        existing_target = existing_config.target_col if existing_config else None
-        existing_features = existing_config.feature_cols if existing_config else []
-
-        # Reconcile with current data
-        if existing_target:
-            existing_target, existing_features = reconcile_target_features(
-                df, existing_target, existing_features, (numeric_cols_sel, categorical_cols_sel)
-            )
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            # Target selection - use existing or default (first selectable when none)
-            if existing_target and existing_target in selectable_flat:
-                target_default_idx = selectable_flat.index(existing_target) + 1
-            elif selectable_flat:
-                target_default_idx = 1
-            else:
-                target_default_idx = 0
-            target_col = st.selectbox(
-                "Target Variable",
-                options=[''] + selectable_flat,
-                index=target_default_idx,
-                key="target_selectbox",
-                help="Select the column you want to predict (numeric or categorical)"
-            )
-
-        with col2:
-            # Feature selection - reconcile with target
-            target_col_reconciled, _ = reconcile_target_features(
-                df, target_col, existing_features, (numeric_cols_sel, categorical_cols_sel)
-            )
-            feature_options = [col for col in selectable_flat if col != target_col_reconciled]
-            
-            # Read from session_state if available, otherwise use existing
-            features_from_state = st.session_state.get('upload_features_multiselect')
-            if features_from_state is not None:
-                feature_defaults = [f for f in features_from_state if f in feature_options]
-            elif existing_features:
-                feature_defaults = [f for f in existing_features if f in feature_options]
-            else:
-                feature_defaults = feature_options[:min(10, len(feature_options))]
-            
-            selected_features = st.multiselect(
-                "Feature Variables",
-                options=feature_options,
-                default=feature_defaults,
-                key="upload_features_multiselect",
-                help="Select columns to use as predictors"
-            )
-        
-        # Datetime column selection (for time-series)
-        datetime_cols = df.select_dtypes(include=['datetime64', 'object']).columns.tolist()
-        datetime_col = None
-        if datetime_cols:
-            existing_datetime = existing_config.datetime_col if existing_config else None
-            datetime_default_idx = 0
-            if existing_datetime and existing_datetime in datetime_cols:
-                datetime_default_idx = datetime_cols.index(existing_datetime) + 1
-            
-            datetime_col = st.selectbox(
-                "Datetime Column (Optional, for time-series splits)",
-                options=['None'] + datetime_cols,
-                index=datetime_default_idx,
-                key="upload_datetime_selectbox",
-                help="Select if you want time-based splitting"
-            )
-            if datetime_col == 'None':
-                datetime_col = None
-        
-        if target_col and selected_features:
-            # Reconcile target and features
-            target_col, selected_features = reconcile_target_features(
-                df, target_col, selected_features, (numeric_cols_sel, categorical_cols_sel)
-            )
-            
-            # Show warning if features were adjusted
-            if existing_features and set(selected_features) != set(existing_features):
-                removed = set(existing_features) - set(selected_features)
-                if removed:
-                    st.info(f"Removed invalid features: {', '.join(removed)}")
-            
-            if not target_col or not selected_features:
-                st.warning("Please select both target and at least one feature")
-            else:
-                # Run task type detection when target is selected/changed
-                task_detection = st.session_state.get('task_type_detection', TaskTypeDetection())
-                should_redetect = (
-                    task_detection.detected is None or
-                    existing_config is None or
-                    existing_config.target_col != target_col
+                # Excel sheet selector (for multi-sheet files)
+                excel_sheet_choice = 0
+                if file_type == 'excel':
+                    uploaded_file.seek(0)
+                    try:
+                        xl = pd.ExcelFile(uploaded_file)
+                        sheet_names = xl.sheet_names
+                        uploaded_file.seek(0)
+                        if len(sheet_names) > 1:
+                            excel_sheet_choice = st.selectbox(
+                                "Excel sheet to load",
+                                options=range(len(sheet_names)),
+                                format_func=lambda i, sn=sheet_names: sn[i],
+                                key=f"excel_sheet_{file_key}",
+                                help="Select which sheet to load from this Excel file"
+                            )
+                        else:
+                            excel_sheet_choice = 0
+                    except Exception:
+                        excel_sheet_choice = 0
+                    uploaded_file.seek(0)
+                
+                # Per-file transpose option
+                transpose_this_file = st.checkbox(
+                    "Transpose this file (rows ↔ columns)",
+                    value=False,
+                    key=f"transpose_{file_key}",
+                    help="Use this if your features are in rows instead of columns"
                 )
                 
-                if should_redetect:
-                    with st.spinner("Detecting task type..."):
-                        task_result = detect_task_type(df, target_col)
-                        task_detection = TaskTypeDetection(
-                            detected=task_result['detected'],
-                            confidence=task_result['confidence'],
-                            reasons=task_result['reasons']
-                        )
-                        st.session_state.task_type_detection = task_detection
+                # Load preview with transpose setting
+                with st.spinner(f"Loading {uploaded_file.name}..."):
+                    df_preview = load_tabular_data(
+                        uploaded_file,
+                        filename=uploaded_file.name,
+                        transpose=transpose_this_file,
+                        excel_sheet=excel_sheet_choice if file_type == 'excel' else 0
+                    )
                 
-                # Auto-detection panel
-                st.subheader("Auto-Detection Results")
+                # Reset file position for later
+                uploaded_file.seek(0)
                 
-                col1, col2 = st.columns(2)
+                # Ensure column names are strings for merging compatibility
+                df_preview.columns = [str(c) for c in df_preview.columns]
+                
+                col1, col2 = st.columns([2, 1])
                 
                 with col1:
-                    st.markdown("**Task Type Detection**")
-                    task_det = st.session_state.task_type_detection
-                    if task_det.detected:
-                        confidence_label = {"high": "high", "med": "medium", "low": "low"}.get(task_det.confidence, "unknown")
-                        st.write(f"Detected: **{task_det.detected.title()}** ({confidence_label} confidence)")
-                        with st.expander("Detection reasons"):
-                            for reason in task_det.reasons:
-                                st.write(f"• {reason}")
-                    else:
-                        st.write("Not detected yet")
+                    preview_rows = min(5, len(df_preview))
+                    st.dataframe(df_preview.head(5), width="stretch")
+                    st.caption(f"Shape: {df_preview.shape[0]:,} rows × {df_preview.shape[1]} columns. Showing first {preview_rows} of {len(df_preview):,} rows.")
+                    if transpose_this_file:
+                        st.info("Preview shows transposed data (original rows are now columns)")
                 
                 with col2:
-                    st.markdown("**Cohort Structure Detection**")
-                    cohort_det = st.session_state.cohort_structure_detection
-                    if cohort_det.detected:
-                        cohort_conf = {"high": "high", "med": "medium", "low": "low"}.get(cohort_det.confidence, "unknown")
-                        st.write(f"Detected: **{cohort_det.detected.replace('_', ' ').title()}** ({cohort_conf} confidence)")
-                        with st.expander("Detection reasons"):
-                            for reason in cohort_det.reasons:
-                                st.write(f"• {reason}")
-                        if cohort_det.entity_id_detected:
-                            st.write(f"Entity ID: `{cohort_det.entity_id_detected}`")
-                    else:
-                        st.write("Not detected yet")
-                
-                # Override controls
-                st.subheader("Manual Overrides")
-                
-                # Task type override - read from session_state
-                task_override_enabled = st.checkbox(
-                    "Override task type",
-                    value=st.session_state.get('upload_task_override_checkbox', task_detection.override_enabled),
-                    key="upload_task_override_checkbox",
-                    help="Manually set task type instead of using auto-detection"
-                )
-                
-                task_override_value = None
-                if task_override_enabled:
-                    task_default_idx = 0
-                    if task_detection.override_value == 'regression':
-                        task_default_idx = 0
-                    elif task_detection.override_value == 'classification':
-                        task_default_idx = 1
-                    elif task_detection.detected == 'regression':
-                        task_default_idx = 0
-                    else:
-                        task_default_idx = 1
-                    
-                    task_override_value = st.radio(
-                        "Task type",
-                        ['regression', 'classification'],
-                        index=task_default_idx,
-                        key="upload_task_override_radio",
-                        horizontal=True
+                    dataset_name = st.text_input(
+                        "Dataset Name",
+                        value=uploaded_file.name.rsplit('.', 1)[0],
+                        key=f"name_{file_key}"
                     )
-                
-                # Update task detection with override
-                task_detection.override_enabled = task_override_enabled
-                task_detection.override_value = task_override_value
-                st.session_state.task_type_detection = task_detection
-                
-                # Cohort type override - read from session_state
-                cohort_override_enabled = st.checkbox(
-                    "Override cohort structure",
-                    value=st.session_state.get('upload_cohort_override_checkbox', cohort_det.override_enabled),
-                    key="upload_cohort_override_checkbox",
-                    help="Manually set cohort structure instead of using auto-detection"
-                )
-                
-                cohort_override_value = None
-                if cohort_override_enabled:
-                    cohort_default_idx = 0
-                    if cohort_det.override_value == 'longitudinal':
-                        cohort_default_idx = 1
-                    elif cohort_det.detected == 'longitudinal':
-                        cohort_default_idx = 1
+                    
+                    # Check if dataset with same name already exists
+                    existing_names = [d['name'] for d in project_datasets] if project_datasets else []
+                    name_exists = dataset_name in existing_names
+                    
+                    if name_exists:
+                        st.warning(f"A dataset named '{dataset_name}' already exists in this project.")
+                        replace_existing = st.checkbox(
+                            f"Replace existing '{dataset_name}'", 
+                            key=f"replace_{file_key}"
+                        )
                     else:
-                        cohort_default_idx = 0
+                        replace_existing = False
                     
-                    cohort_override_value = st.radio(
-                        "Cohort structure",
-                        ['cross_sectional', 'longitudinal'],
-                        index=cohort_default_idx,
-                        key="upload_cohort_override_radio",
-                        horizontal=True,
-                        format_func=lambda x: x.replace('_', ' ').title()
-                    )
-                
-                # Entity ID override - read from session_state
-                entity_override_enabled = st.checkbox(
-                    "Override entity ID column",
-                    value=st.session_state.get('upload_entity_id_override_checkbox', cohort_det.entity_id_override_enabled),
-                    key="upload_entity_id_override_checkbox",
-                    help="Manually select entity ID column for longitudinal data"
-                )
-                
-                entity_override_value = None
-                if entity_override_enabled:
-                    entity_options = ['None'] + (cohort_det.entity_id_candidates or [])
-                    entity_default_idx = 0
-                    if cohort_det.entity_id_override_value:
-                        if cohort_det.entity_id_override_value in entity_options:
-                            entity_default_idx = entity_options.index(cohort_det.entity_id_override_value)
-                    elif cohort_det.entity_id_detected and cohort_det.entity_id_detected in entity_options:
-                        entity_default_idx = entity_options.index(cohort_det.entity_id_detected)
-                    
-                    entity_override_value = st.selectbox(
-                        "Entity ID column",
-                        options=entity_options,
-                        index=entity_default_idx,
-                        key="upload_entity_id_override_selectbox"
-                    )
-                    if entity_override_value == 'None':
-                        entity_override_value = None
-                
-                # Update cohort detection with overrides
-                cohort_det.override_enabled = cohort_override_enabled
-                cohort_det.override_value = cohort_override_value
-                cohort_det.entity_id_override_enabled = entity_override_enabled
-                cohort_det.entity_id_override_value = entity_override_value
-                st.session_state.cohort_structure_detection = cohort_det
-                
-                # Get final values
-                task_type_final = task_detection.final
-                cohort_type_final = cohort_det.final
-                entity_id_final = cohort_det.entity_id_final
-                
-                # Warn if task type changed
-                if existing_config and existing_config.task_type and existing_config.task_type != task_type_final:
-                    if task_type_final == 'classification' and existing_config.task_type == 'regression':
-                        st.info("Switched to classification. Ensure target has discrete values.")
-            
-            # Store configuration (use final values)
-            data_config = DataConfig(
-                target_col=target_col,
-                feature_cols=selected_features,
-                datetime_col=datetime_col,
-                task_type=task_type_final if target_col and selected_features else None
-            )
-            st.session_state.data_config = data_config
-            
-            # Time-series warning (will check in Train page)
-            if datetime_col:
-                st.info("Datetime column selected. You can enable time-based splitting in the Train & Compare page.")
-            
-            # Safe getter for task type display
-            task_type_display = task_type_final if task_type_final else (task_detection.detected if task_detection.detected else "regression")
-            st.success(f"Configuration saved: {task_type_display.title()} task with {len(selected_features)} features")
-            
-            # "What you should do next" guidance
-            st.markdown("---")
-            st.header("What You Should Do Next")
-            
-            next_steps = []
-            
-            # Check for high missingness
-            if df is not None:
-                missing_cols = df[selected_features].isnull().sum()
-                high_missing = missing_cols[missing_cols > len(df) * 0.05]
-                if len(high_missing) > 0:
-                    next_steps.append(f"**High missingness** in {len(high_missing)} columns → Run 'Missingness Scan' in EDA page")
-            
-            
-            # Check for unit issues
-            if df is not None and target_col:
-                signals = compute_dataset_signals(
-                    df,
-                    target_col,
-                    task_type_final,
-                    cohort_type_final,
-                    entity_id_final,
-                    outlier_method=st.session_state.get("eda_outlier_method", "iqr")
-                )
-                if signals.physio_plausibility_flags:
-                    next_steps.append("**Physiologic plausibility flags** detected → Run 'Physiologic Plausibility Check' in EDA page")
-            
-            # Check for longitudinal
-            if cohort_type_final == 'longitudinal' and entity_id_final:
-                next_steps.append(f"**Longitudinal data** detected (Entity ID: {entity_id_final}) → Use group-based splitting in Train & Compare page")
-            
-            # Check for outliers (regression)
-            if task_type_final == 'regression' and df is not None and target_col:
-                target_data = df[target_col].dropna()
-                if len(target_data) > 0:
-                    q1, q3 = target_data.quantile([0.25, 0.75])
-                    iqr = q3 - q1
-                    outliers = ((target_data < q1 - 1.5*iqr) | (target_data > q3 + 1.5*iqr)).sum()
-                    if outliers > len(target_data) * 0.1:
-                        next_steps.append(f"**High outlier rate** ({outliers/len(target_data):.1%}) → Consider robust models (Huber) or tree-based models")
-            
-            if not next_steps:
-                next_steps.append("**Ready for EDA** → Go to EDA page to explore relationships and patterns")
-            
-            for step in next_steps:
-                st.markdown(f"• {step}")
-            
-            # State Debug (Advanced)
-            with st.expander("Advanced / State Debug", expanded=False):
-                st.markdown("**Current State:**")
-                st.write(f"• Data shape: {df.shape if df is not None else 'None'}")
-                st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
-                st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
-                task_det = st.session_state.get('task_type_detection')
-                cohort_det = st.session_state.get('cohort_structure_detection')
-                st.write(f"• Task type (final): {task_det.final if task_det else 'None'}")
-                st.write(f"• Cohort type (final): {cohort_det.final if cohort_det else 'None'}")
-                st.write(f"• Entity ID (final): {cohort_det.entity_id_final if cohort_det else 'None'}")
-                unit_overrides = st.session_state.get('unit_overrides', {})
-                st.write(f"• Unit overrides: {len(unit_overrides)}")
-        else:
-            # Target not yet selected - show guidance
-            st.markdown("---")
-            st.header("What You Should Do Next")
-            st.info("**Select a target variable** above to unlock cohort auditing recommendations and proceed to EDA.")
+                    if st.button(f"Add to Project", key=f"add_{file_key}", type="primary"):
+                        # Delete existing if replacing
+                        if name_exists and replace_existing:
+                            for d in project_datasets:
+                                if d['name'] == dataset_name:
+                                    db.delete_dataset(d['id'])
+                                    if d['id'] in st.session_state.datasets_registry:
+                                        del st.session_state.datasets_registry[d['id']]
+                                    break
+                        elif name_exists and not replace_existing:
+                            st.error(f"Please check 'Replace existing' or change the dataset name.")
+                            st.stop()
+                        
+                        # Reload to ensure fresh data
+                        uploaded_file.seek(0)
+                        sheet_param = excel_sheet_choice if file_type == 'excel' else 0
+                        with st.spinner(f"Adding {dataset_name} to project..."):
+                            df = load_tabular_data(
+                                uploaded_file,
+                                filename=uploaded_file.name,
+                                transpose=transpose_this_file,
+                                excel_sheet=sheet_param
+                            )
+                        
+                        # Ensure column names are strings for merge compatibility
+                        df.columns = [str(c) for c in df.columns]
+                        
+                        # Get column types
+                        col_types = {str(col): str(df[col].dtype) for col in df.columns}
+                        
+                        # Add to database
+                        dataset_id = db.add_dataset(
+                            project_id=active_project['id'],
+                            name=dataset_name,
+                            filename=uploaded_file.name,
+                            file_type=file_type,
+                            shape_rows=df.shape[0],
+                            shape_cols=df.shape[1],
+                            columns=[str(c) for c in df.columns],
+                            column_types=col_types,
+                            is_transposed=transpose_this_file
+                        )
+                        
+                        # Store DataFrame in registry
+                        st.session_state.datasets_registry[dataset_id] = df
+                        
+                        st.success(f"Added '{dataset_name}' to project!")
+                        st.rerun()
+                        
+            except Exception as e:
+                st.error(f"Error loading file: {e}")
+                logger.exception(e)
+
+# Built-in datasets option
+with st.expander("Or Use Built-in Dataset"):
+    builtin_options = [''] + list(get_builtin_datasets().keys())
+    selected_builtin = st.selectbox("Built-in Dataset", builtin_options, key="builtin_select")
+    
+    if selected_builtin and st.button("Add Built-in Dataset", key="add_builtin"):
+        generator = get_builtin_datasets()[selected_builtin]
+        df_builtin = generator(random_state=st.session_state.get('random_seed', 42))
         
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
-        logger.exception(e)
+        col_types = {col: str(df_builtin[col].dtype) for col in df_builtin.columns}
+        
+        dataset_id = db.add_dataset(
+            project_id=active_project['id'],
+            name=selected_builtin,
+            filename=f"builtin_{selected_builtin}",
+            file_type='builtin',
+            shape_rows=df_builtin.shape[0],
+            shape_cols=df_builtin.shape[1],
+            columns=list(df_builtin.columns),
+            column_types=col_types,
+            is_transposed=False
+        )
+        
+        st.session_state.datasets_registry[dataset_id] = df_builtin
+        st.success(f"Added '{selected_builtin}' to project!")
+        st.rerun()
+
+# Refresh project datasets
+project_datasets = db.get_project_datasets(active_project['id'])
+
+if not project_datasets:
+    st.info("Upload at least one dataset to continue.")
+    st.stop()
+
+# ============================================================================
+# SECTION 3: MERGE DATASETS (if multiple)
+# ============================================================================
+st.markdown("---")
+
+if len(project_datasets) > 1:
+    st.header("Step 3: Combine Your Datasets")
+    
+    # Check how many datasets are ready in memory
+    datasets_ready = sum(1 for d in project_datasets if d['id'] in st.session_state.datasets_registry)
+    datasets_total = len(project_datasets)
+    
+    if datasets_ready < datasets_total:
+        st.error(f"""
+        **Cannot proceed: {datasets_total - datasets_ready} of {datasets_total} datasets not loaded.**
+        
+        Please scroll up to Step 2 and either:
+        - Re-upload the missing files, or  
+        - Clear the old dataset records and upload fresh files
+        """)
+        st.stop()
+    
+    # Load all dataframes (ensure string column names for merge compatibility)
+    dataframes = {}
+    for d in project_datasets:
+        if d['id'] in st.session_state.datasets_registry:
+            df_temp = st.session_state.datasets_registry[d['id']].copy()
+            df_temp.columns = [str(c) for c in df_temp.columns]
+            dataframes[d['name']] = df_temp
+    
+    # -------------------------------------------------------------------------
+    # PLAIN LANGUAGE EXPLANATION
+    # -------------------------------------------------------------------------
+    st.info("""
+    **You have multiple files uploaded.** Before analysis, you need to combine them into one table.
+    
+    Think of it like this: if you have patient demographics in one file and their lab results in another, 
+    you need to connect them so each patient's info is on the same row as their results.
+    """)
+    
+    # -------------------------------------------------------------------------
+    # VISUAL SCHEMA DIAGRAM
+    # -------------------------------------------------------------------------
+    # Detect common columns for the visual
+    common_cols = detect_common_columns(project_datasets)
+    
+    render_schema_diagram(dataframes, common_cols)
+    
+    # -------------------------------------------------------------------------
+    # DATA ORIENTATION CHECK
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Check Your Data Structure")
+    st.caption("""
+    **Important:** For analysis, your data should usually have:
+    - **Rows** = observations (patients, samples, records) 
+    - **Columns** = variables/features to analyze
+    
+    If your data is structured the other way around, you can transpose it here.
+    """)
+    
+    # Track transposed dataframes
+    if 'transposed_for_merge' not in st.session_state:
+        st.session_state.transposed_for_merge = {}
+    
+    orientation_issues = []
+    
+    for name, df in dataframes.items():
+        with st.expander(f"**{name}** — {df.shape[0]:,} rows × {df.shape[1]} columns", expanded=False):
+            # Show preview
+            st.dataframe(df.head(3), width="stretch")
+            
+            # Check orientation
+            cols_much_larger = df.shape[1] > df.shape[0] * 2 and df.shape[1] > 10
+            rows_much_larger = df.shape[0] > df.shape[1] * 10 and df.shape[0] > 100
+            
+            if cols_much_larger:
+                st.warning(f"""
+                **Possible issue:** This dataset has {df.shape[1]} columns but only {df.shape[0]} rows.
+                
+                If your {df.shape[1]} columns are actually observations (like patients or samples) 
+                and your {df.shape[0]} rows are features, you should transpose this data.
+                """)
+                orientation_issues.append(name)
+            
+            # Transpose option for this dataset
+            transpose_key = f"transpose_merge_{name}"
+            currently_transposed = st.session_state.transposed_for_merge.get(name, False)
+            
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                if currently_transposed:
+                    st.success(f"This dataset will be transposed (rows ↔ columns) before merging.")
+                else:
+                    st.caption("Data will be used as-is.")
+            
+            with col2:
+                btn_label = "Undo Transpose" if currently_transposed else "Transpose"
+                if st.button(btn_label, key=f"btn_transpose_{name}"):
+                    st.session_state.transposed_for_merge[name] = not currently_transposed
+                    st.rerun()
+            
+            # Show preview of transposed version and download option
+            if currently_transposed:
+                st.markdown("**Preview after transpose:**")
+                transposed_df = df.T.reset_index()
+                transposed_df.columns = ['index'] + [f"col_{i}" for i in range(len(transposed_df.columns)-1)]
+                st.dataframe(transposed_df.head(5), width="stretch")
+                st.caption(f"After transpose: {transposed_df.shape[0]:,} rows × {transposed_df.shape[1]} columns")
+                
+                # Download transposed data
+                csv_data = transposed_df.to_csv(index=False)
+                st.download_button(
+                    label=f"Download Transposed '{name}' as CSV",
+                    data=csv_data,
+                    file_name=f"{name}_transposed.csv",
+                    mime="text/csv",
+                    key=f"download_transposed_{name}"
+                )
+            
+            # Always offer download of original/current version
+            st.markdown("---")
+            original_csv = df.to_csv(index=False)
+            st.download_button(
+                label=f"Download '{name}' as CSV (current version)",
+                data=original_csv,
+                file_name=f"{name}.csv",
+                mime="text/csv",
+                key=f"download_original_{name}"
+            )
+    
+    # Apply transpositions to dataframes for merging
+    for name in list(dataframes.keys()):
+        if st.session_state.transposed_for_merge.get(name, False):
+            original_df = dataframes[name]
+            # Transpose and use first row as header if it looks like labels
+            transposed = original_df.T.reset_index()
+            # Try to use meaningful column names (deduplicate if first row has duplicates)
+            if len(transposed.columns) > 0 and len(transposed) > 0:
+                raw_cols = [str(c) for c in transposed.iloc[0]]
+                transposed.columns = make_unique_columns(raw_cols)
+                transposed = transposed.iloc[1:].reset_index(drop=True)
+            transposed.columns = make_unique_columns(transposed.columns)
+            dataframes[name] = transposed
+    
+    # Re-detect common columns after transposition
+    # Build project_datasets equivalent from dataframes
+    updated_project_datasets = [
+        {'name': name, 'columns': list(df.columns)} 
+        for name, df in dataframes.items()
+    ]
+    common_cols = detect_common_columns(updated_project_datasets)
+    
+    if orientation_issues:
+        st.info(f"""
+        **Tip:** {len(orientation_issues)} dataset(s) may have unusual structure. 
+        Review them above and use the Transpose button if needed.
+        """)
+    
+    st.markdown("---")
+    
+    # -------------------------------------------------------------------------
+    # MERGE OPTIONS
+    # -------------------------------------------------------------------------
+    st.subheader("How would you like to combine them?")
+    
+    # Use the already-computed common_cols from transposed data
+    # Re-compute suggestions based on potentially transposed data
+    suggestions = suggest_join_keys(updated_project_datasets)
+    
+    # Initialize merge mode
+    if 'merge_mode' not in st.session_state:
+        st.session_state.merge_mode = 'guided'
+    
+    # Option 1: Skip merge (just use first dataset)
+    # Option 2: Guided merge (we help them)
+    # Option 3: Advanced merge (full control)
+    
+    merge_choice = st.radio(
+        "Choose an option:",
+        [
+            "Combine datasets using a shared column (recommended)",
+            "Just use one dataset (ignore the others)",
+            "I know what I'm doing (advanced options)"
+        ],
+        key="merge_choice_radio",
+        label_visibility="collapsed",
+        help="Combine: merge on a shared ID column. Just use one: pick a single dataset. Advanced: full control over join type and columns."
+    )
+    
+    # -------------------------------------------------------------------------
+    # OPTION 1: GUIDED MERGE (Recommended)
+    # -------------------------------------------------------------------------
+    if "Combine datasets" in merge_choice:
+        st.markdown("#### Connect Your Datasets")
+        
+        if not common_cols:
+            st.warning("""
+            **No matching columns found between your datasets.**
+            
+            To combine datasets, they need at least one column in common (like "patient_id", "date", or "record_number").
+            
+            Check that your files have a shared identifier column with the same name.
+            """)
+        else:
+            st.success(f"**Good news!** We found {len(common_cols)} column(s) that appear in multiple datasets.")
+            
+            # Show the common columns in plain language
+            st.markdown("**Shared columns that can connect your data:**")
+            for col, ds_list in common_cols.items():
+                st.write(f"• `{col}` - found in: {', '.join(ds_list)}")
+            
+            st.markdown("---")
+            
+            # Simple merge interface
+            st.markdown("#### Set Up Your Merge")
+            
+            dataset_names = list(dataframes.keys())
+            
+            # For 2 datasets, make it simple
+            if len(dataset_names) == 2:
+                st.markdown(f"""
+                You have **{dataset_names[0]}** and **{dataset_names[1]}**.
+                
+                Select the column that links them together:
+                """)
+                
+                # Find columns that exist in both
+                cols_in_both = [col for col, ds_list in common_cols.items() if len(ds_list) >= 2]
+                
+                if cols_in_both:
+                    linking_column = st.selectbox(
+                        "Linking column:",
+                        options=cols_in_both,
+                        key="simple_link_col",
+                        help="This column should contain values that match between your two datasets (like IDs or dates)"
+                    )
+                    
+                    # Explain what will happen
+                    df1, df2 = dataframes[dataset_names[0]], dataframes[dataset_names[1]]
+                    
+                    st.markdown("**What will happen:**")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric(f"{dataset_names[0]}", f"{df1.shape[0]:,} rows")
+                    with col2:
+                        st.metric(f"{dataset_names[1]}", f"{df2.shape[0]:,} rows")
+                    with col3:
+                        # Estimate result size
+                        matching_values = set(df1[linking_column].dropna().unique()) & set(df2[linking_column].dropna().unique())
+                        st.metric("Matching values", f"{len(matching_values):,}")
+                    
+                    st.caption(f"Rows will be matched where `{linking_column}` values are the same in both datasets.")
+                    
+                    # Preview button
+                    if st.button("Preview Combined Data", key="preview_merge"):
+                        try:
+                            with st.spinner("Merging datasets..."):
+                                preview_df = pd.merge(df1, df2, on=linking_column, how='inner', suffixes=('', '_2'))
+                            st.session_state.merge_preview = preview_df
+                            st.session_state.merge_config = {
+                                'left': dataset_names[0],
+                                'right': dataset_names[1],
+                                'on': linking_column,
+                                'how': 'inner'
+                            }
+                        except Exception as e:
+                            st.error(f"Preview failed: {e}")
+                    
+                    # Show preview if available
+                    if 'merge_preview' in st.session_state and st.session_state.merge_preview is not None:
+                        st.markdown("#### Preview of Combined Data")
+                        preview_df = st.session_state.merge_preview
+                        st.dataframe(preview_df.head(10), width="stretch")
+                        st.caption(f"Combined result: {preview_df.shape[0]:,} rows × {preview_df.shape[1]} columns")
+                        
+                        if preview_df.shape[0] == 0:
+                            st.error("""
+                            **No matching rows found!** 
+                            
+                            This means the values in your linking column don't match between the two files.
+                            Check that the data in this column is formatted the same way in both files.
+                            """)
+                        else:
+                            st.success("This looks good! Click below to use this combined data for your analysis.")
+                            
+                            if st.button("Use This Combined Data", type="primary", key="confirm_merge"):
+                                st.session_state.working_table = preview_df
+                                st.session_state.last_merge_columns = list(preview_df.columns)
+                                
+                                # Save merge config
+                                merge_cfg = st.session_state.merge_config
+                                db.save_merge_config(
+                                    project_id=active_project['id'],
+                                    name=f"Merge_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                                    merge_steps=[{
+                                        'left': merge_cfg['left'],
+                                        'right': merge_cfg['right'],
+                                        'left_on': merge_cfg['on'],
+                                        'right_on': merge_cfg['on'],
+                                        'how': merge_cfg['how']
+                                    }],
+                                    result_shape=(preview_df.shape[0], preview_df.shape[1]),
+                                    result_columns=list(preview_df.columns),
+                                    set_as_working=True
+                                )
+                                
+                                set_data(preview_df)
+                                st.session_state.pop('merge_preview', None)
+                                st.session_state.pop('merge_config', None)
+                                st.success("Combined data is ready for analysis!")
+                                st.rerun()
+                else:
+                    st.warning("No columns are shared between both datasets. Check your column names.")
+            
+            else:
+                # More than 2 datasets - comprehensive chaining workflow
+                st.markdown("""
+                ### Multi-Dataset Merge Workflow
+                
+                You have **{} datasets**. You'll combine them step by step, creating intermediate results.
+                
+                **Common scenario:** You might have:
+                - A main data matrix (e.g., gene expression, features)
+                - Outcome/label data (e.g., classifications, target variable)  
+                - Metadata/annotations (e.g., row/column names, descriptions)
+                """.format(len(dataset_names)))
+                
+                # Show current merge progress
+                if 'multi_merge_result' in st.session_state and st.session_state.multi_merge_result is not None:
+                    st.success(f"**Current merged result:** {st.session_state.multi_merge_result.shape[0]:,} rows × {st.session_state.multi_merge_result.shape[1]:,} columns")
+                    
+                    # Option to continue merging or finish
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Continue - Add Another Dataset", key="continue_merge"):
+                            pass  # Continue with the merge form below
+                    with col2:
+                        if st.button("Finish - Use Current Result", type="primary", key="finish_multi_merge"):
+                            st.session_state.working_table = st.session_state.multi_merge_result
+                            st.session_state.last_merge_columns = list(st.session_state.multi_merge_result.columns)
+                            set_data(st.session_state.multi_merge_result)
+                            st.session_state.pop('multi_merge_result', None)
+                            st.success("Merge complete!")
+                            st.rerun()
+                    
+                    st.divider()
+                
+                # Step-by-step merge builder
+                st.markdown("#### Add Merge Step")
+                
+                # Determine what can be merged
+                if 'multi_merge_result' in st.session_state and st.session_state.multi_merge_result is not None:
+                    left_options = ["(Previous Merge Result)"] + dataset_names
+                    default_left = "(Previous Merge Result)"
+                else:
+                    left_options = dataset_names
+                    default_left = dataset_names[0] if dataset_names else None
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    left_choice = st.selectbox(
+                        "Left (base) dataset:", 
+                        left_options, 
+                        key="multi_left_choice"
+                    )
+                with col2:
+                    right_options = [d for d in dataset_names if d != left_choice or left_choice == "(Previous Merge Result)"]
+                    right_choice = st.selectbox(
+                        "Right (to add) dataset:", 
+                        right_options, 
+                        key="multi_right_choice"
+                    )
+                
+                # Get the dataframes
+                if left_choice == "(Previous Merge Result)":
+                    left_df = st.session_state.multi_merge_result
+                    left_cols = list(left_df.columns)
+                else:
+                    left_df = dataframes[left_choice]
+                    left_cols = list(left_df.columns)
+                
+                right_df = dataframes[right_choice]
+                right_cols = list(right_df.columns)
+                
+                # Find shared columns
+                shared_cols = list(set(left_cols) & set(right_cols))
+                
+                st.markdown("**How to connect these datasets:**")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.caption(f"Left: {left_choice}")
+                    left_on = st.selectbox(
+                        "Left join column:", 
+                        [''] + left_cols,
+                        key="multi_left_on"
+                    )
+                with col2:
+                    st.caption(f"Right: {right_choice}")
+                    # Default to same column if shared
+                    default_right_idx = 0
+                    if left_on and left_on in right_cols:
+                        default_right_idx = right_cols.index(left_on) + 1
+                    right_on = st.selectbox(
+                        "Right join column:", 
+                        [''] + right_cols,
+                        index=default_right_idx,
+                        key="multi_right_on"
+                    )
+                
+                if shared_cols:
+                    st.info(f"**Shared columns detected:** {', '.join(shared_cols[:5])}{'...' if len(shared_cols) > 5 else ''}")
+                else:
+                    st.warning("No shared column names. Make sure you select matching ID/key columns.")
+                
+                # Join type
+                join_type = st.radio(
+                    "How to handle non-matching rows:",
+                    ["Keep only matching rows (inner join)", 
+                     "Keep all from left, match from right (left join)",
+                     "Keep all rows from both (outer join)"],
+                    key="multi_join_type"
+                )
+                join_how = {'inner': 'inner', 'left': 'left', 'outer': 'outer'}
+                how = 'inner' if 'inner' in join_type else ('left' if 'left' in join_type else 'outer')
+                
+                # Preview and execute
+                if left_on and right_on:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("Preview Merge", key="preview_multi_merge"):
+                            try:
+                                preview = pd.merge(
+                                    left_df, right_df,
+                                    left_on=left_on, right_on=right_on,
+                                    how=how, suffixes=('', '_2')
+                                )
+                                st.session_state.multi_merge_preview = preview
+                            except Exception as e:
+                                st.error(f"Preview failed: {e}")
+                    
+                    with col2:
+                        if st.button("Execute Merge", type="primary", key="execute_multi_merge"):
+                            try:
+                                merged = pd.merge(
+                                    left_df, right_df,
+                                    left_on=left_on, right_on=right_on,
+                                    how=how, suffixes=('', '_2')
+                                )
+                                st.session_state.multi_merge_result = merged
+                                st.session_state.pop('multi_merge_preview', None)
+                                st.success(f"Merged! Result: {merged.shape[0]:,} rows × {merged.shape[1]:,} columns")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Merge failed: {e}")
+                    
+                    # Show preview if available
+                    if 'multi_merge_preview' in st.session_state and st.session_state.multi_merge_preview is not None:
+                        st.markdown("**Preview:**")
+                        preview = st.session_state.multi_merge_preview
+                        st.dataframe(preview.head(10), width="stretch")
+                        st.caption(f"Result would be: {preview.shape[0]:,} rows × {preview.shape[1]:,} columns")
+                        
+                        if preview.shape[0] == 0:
+                            st.error("No matching rows! Check that your join columns have matching values.")
+                else:
+                    st.caption("Select join columns to enable merge.")
+    
+    # -------------------------------------------------------------------------
+    # OPTION 2: USE SINGLE DATASET
+    # -------------------------------------------------------------------------
+    elif "Just use one" in merge_choice:
+        st.markdown("#### Select Which Dataset to Use")
+        st.caption("The other datasets will be ignored for this analysis.")
+        
+        dataset_names = list(dataframes.keys())
+        selected_single = st.selectbox(
+            "Dataset to use:",
+            options=dataset_names,
+            key="single_dataset_select"
+        )
+        
+        selected_df = dataframes[selected_single]
+        st.dataframe(selected_df.head(5), width="stretch")
+        st.caption(f"Shape: {selected_df.shape[0]:,} rows × {selected_df.shape[1]} columns")
+        
+        if st.button("Use This Dataset", type="primary", key="use_single"):
+            st.session_state.working_table = selected_df
+            set_data(selected_df)
+            st.success(f"Using '{selected_single}' for analysis.")
+            st.rerun()
+    
+    # -------------------------------------------------------------------------
+    # OPTION 3: ADVANCED MERGE
+    # -------------------------------------------------------------------------
+    else:
+        st.markdown("#### Advanced Merge Options")
+        st.caption("For users familiar with database joins.")
+        
+        # Initialize merge steps in session state
+        if 'merge_steps' not in st.session_state:
+            st.session_state.merge_steps = []
+        
+        dataset_names = list(dataframes.keys())
+        
+        with st.expander("Join Type Reference", expanded=False):
+            st.markdown("""
+            - **Inner Join**: Only rows where the key exists in BOTH tables
+            - **Left Join**: All rows from left table, matched rows from right (nulls if no match)
+            - **Right Join**: All rows from right table, matched rows from left (nulls if no match)
+            - **Outer Join**: All rows from both tables (nulls where no match)
+            """)
+        
+        # Add merge step form
+        with st.form("merge_step_form"):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                left_options = ['(Previous Result)'] + dataset_names if st.session_state.merge_steps else dataset_names
+                left_table = st.selectbox("Left Table", left_options, key="merge_left")
+            
+            with col2:
+                right_table = st.selectbox("Right Table", dataset_names, key="merge_right")
+            
+            with col3:
+                join_type = st.selectbox("Join Type", ['inner', 'left', 'right', 'outer'], key="merge_how")
+            
+            # Determine available columns for join
+            if left_table == '(Previous Result)' and st.session_state.merge_steps:
+                left_cols = [str(c) for c in st.session_state.get('last_merge_columns', [])]
+            else:
+                left_df = dataframes.get(left_table)
+                left_cols = [str(c) for c in left_df.columns] if left_df is not None else []
+            
+            right_df = dataframes.get(right_table)
+            right_cols = [str(c) for c in right_df.columns] if right_df is not None else []
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                left_on = st.selectbox("Left Join Column", [''] + left_cols, key="merge_left_on")
+            with col2:
+                right_on = st.selectbox("Right Join Column", [''] + right_cols, key="merge_right_on")
+            
+            submitted = st.form_submit_button("Add Merge Step")
+            
+            if submitted:
+                if not left_on or not right_on:
+                    st.error("Please select both a Left Join Column and Right Join Column before adding a merge step.")
+                elif left_table == right_table:
+                    st.error("Left and Right tables must be different.")
+                else:
+                    step = {
+                        'left': 'result' if left_table == '(Previous Result)' else left_table,
+                        'right': right_table,
+                        'left_on': left_on,
+                        'right_on': right_on,
+                        'how': join_type
+                    }
+                    st.session_state.merge_steps.append(step)
+                    # Update last_merge_columns for next step
+                    if st.session_state.merge_steps:
+                        try:
+                            # Preview what columns will result
+                            temp_result = execute_merge(dataframes, st.session_state.merge_steps)
+                            st.session_state.last_merge_columns = list(temp_result.columns)
+                        except Exception as e:
+                            logger.debug(f"Could not preview merge columns: {e}")
+                    st.rerun()
+        
+        # Show current merge steps
+        if st.session_state.merge_steps:
+            st.markdown("**Merge Pipeline:**")
+            for i, step in enumerate(st.session_state.merge_steps):
+                left_name = "Previous Result" if step['left'] == 'result' else step['left']
+                st.code(f"{i+1}. {left_name} {step['how'].upper()} JOIN {step['right']} ON {step['left_on']} = {step['right_on']}")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("Clear All", type="secondary"):
+                    st.session_state.merge_steps = []
+                    st.session_state.pop('working_table', None)
+                    st.session_state.pop('last_merge_columns', None)
+                    st.rerun()
+            
+            with col2:
+                if st.button("Execute Merge", type="primary"):
+                    try:
+                        merged_df = execute_merge(dataframes, st.session_state.merge_steps)
+                        st.session_state.working_table = merged_df
+                        st.session_state.last_merge_columns = list(merged_df.columns)
+                        
+                        db.save_merge_config(
+                            project_id=active_project['id'],
+                            name=f"Merge_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                            merge_steps=st.session_state.merge_steps,
+                            result_shape=(merged_df.shape[0], merged_df.shape[1]),
+                            result_columns=list(merged_df.columns),
+                            set_as_working=True
+                        )
+                        
+                        set_data(merged_df)
+                        st.success(f"Merge complete! Result: {merged_df.shape[0]:,} rows × {merged_df.shape[1]} columns")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Merge failed: {e}")
+                        logger.exception(e)
+    
+    # -------------------------------------------------------------------------
+    # SHOW WORKING TABLE IF EXISTS
+    # -------------------------------------------------------------------------
+    if 'working_table' in st.session_state and st.session_state.working_table is not None:
+        st.markdown("---")
+        st.subheader("Your Combined Data (Working Table)")
+        working_df = st.session_state.working_table
+        st.dataframe(working_df.head(10), width="stretch")
+        st.caption(f"Current shape: {working_df.shape[0]:,} rows × {working_df.shape[1]} columns")
+        
+        # -------------------------------------------------------------------------
+        # FINAL ORIENTATION CHECK FOR ANALYSIS
+        # -------------------------------------------------------------------------
+        st.markdown("#### Prepare for Analysis")
+        
+        # Check if orientation might be wrong for analysis
+        cols_much_larger = working_df.shape[1] > working_df.shape[0] * 2 and working_df.shape[1] > 10
+        
+        st.markdown("""
+        **Before proceeding:** Make sure your data is oriented correctly for analysis.
+        
+        For most analyses:
+        - Each **row** should be one observation (patient, sample, record, etc.)
+        - Each **column** should be one variable/feature you want to analyze
+        """)
+        
+        if cols_much_larger:
+            st.warning(f"""
+            **Your data has {working_df.shape[1]} columns but only {working_df.shape[0]} rows.**
+            
+            If your observations are actually in columns (e.g., each column is a patient/sample), 
+            you should transpose the data so observations become rows.
+            """)
+        
+        # Action buttons
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("Transpose for Analysis (rows ↔ columns)", key="transpose_final"):
+                transposed = working_df.T.reset_index()
+                # Try to use first row as column names (deduplicate if duplicates)
+                if len(transposed) > 0:
+                    raw_cols = [str(c) for c in transposed.iloc[0]]
+                    transposed.columns = make_unique_columns(raw_cols)
+                    transposed = transposed.iloc[1:].reset_index(drop=True)
+                transposed.columns = make_unique_columns(transposed.columns)
+                
+                st.session_state.working_table = transposed
+                st.session_state.last_merge_columns = list(transposed.columns)
+                set_data(transposed)
+                st.success(f"Data transposed! New shape: {transposed.shape[0]:,} rows × {transposed.shape[1]} columns")
+                st.rerun()
+        
+        with col2:
+            # Download working table
+            working_csv = working_df.to_csv(index=False)
+            st.download_button(
+                label="Download Working Table (CSV)",
+                data=working_csv,
+                file_name="working_table.csv",
+                mime="text/csv",
+                key="download_working_table"
+            )
+        
+        with col3:
+            if st.button("Start Over (Clear Working Table)", type="secondary", key="clear_working", help="Clear the combined data and return to merge setup"):
+                st.session_state['confirm_clear_working'] = True
+            
+            if st.session_state.get('confirm_clear_working'):
+                st.warning("Are you sure? This will clear your working table and you will need to re-merge datasets.")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Yes, Clear Working Table", type="primary", key="confirm_clear_working_yes"):
+                        st.session_state.pop('working_table', None)
+                        st.session_state.pop('merge_preview', None)
+                        st.session_state.pop('merge_config', None)
+                        st.session_state.pop('merge_steps', None)
+                        st.session_state.pop('last_merge_columns', None)
+                        st.session_state.pop('transposed_for_merge', None)
+                        st.session_state.pop('confirm_clear_working', None)
+                        reset_data_dependent_state()
+                        st.rerun()
+                with c2:
+                    if st.button("Cancel", key="confirm_clear_working_no"):
+                        st.session_state.pop('confirm_clear_working', None)
+                        st.rerun()
+        
+        st.success(f"**Data ready for analysis!** {working_df.shape[0]:,} observations × {working_df.shape[1]} variables")
+
 else:
-    st.info("👈 Please upload a CSV file to get started")
+    # Single dataset - use it directly
+    st.header("Step 3: Working Table")
+    st.caption("With a single dataset, it becomes your working table directly.")
+    
+    single_dataset = project_datasets[0]
+    
+    if single_dataset['id'] in st.session_state.datasets_registry:
+        working_df = st.session_state.datasets_registry[single_dataset['id']].copy()
+        # Ensure string column names
+        working_df.columns = [str(c) for c in working_df.columns]
+        st.session_state.working_table = working_df
+        set_data(working_df)
+        
+        st.success(f"**Working Table:** {single_dataset['name']}")
+        st.dataframe(working_df.head(10), width="stretch")
+        st.caption(f"Shape: {working_df.shape[0]:,} rows × {working_df.shape[1]} columns")
+    else:
+        st.error("""
+        **Dataset not in memory.** 
+        
+        Please scroll up to Step 2 and either:
+        - Re-upload the file, or
+        - Clear the old dataset record and upload a fresh file
+        """)
+        st.stop()
+
+# Get working table
+df = get_data()
+
+if df is None:
+    st.warning("Please complete the merge step or load a single dataset to continue.")
+    st.stop()
+
+if len(df) == 0 or len(df.columns) == 0:
+    st.warning("Your working table is empty. Please upload data with at least one row and one column.")
+    st.stop()
+
+# ============================================================================
+# SECTION 4: DATA AUDIT
+# ============================================================================
+st.markdown("---")
+st.header("Step 4: Data Audit")
+
+# Quick summary metrics at top
+col1, col2, col3, col4, col5 = st.columns(5)
+with col1:
+    st.metric("Rows", f"{df.shape[0]:,}")
+with col2:
+    st.metric("Columns", df.shape[1])
+with col3:
+    missing_total = df.isnull().sum().sum()
+    total_cells = df.shape[0] * df.shape[1]
+    missing_pct = (missing_total / total_cells) * 100 if total_cells > 0 else 0
+    st.metric("Missing Values", f"{missing_total:,}", f"{missing_pct:.1f}%")
+with col4:
+    numeric_count = len(get_numeric_columns(df))
+    st.metric("Numeric Columns", numeric_count)
+with col5:
+    n_duplicates = df.duplicated().sum()
+    st.metric("Duplicate Rows", f"{n_duplicates:,}")
+
+audit_results = {}
+
+# -------------------------------------------------------------------------
+# CARDINALITY ANALYSIS
+# -------------------------------------------------------------------------
+with st.expander("Cardinality Analysis (Unique Values per Column)", expanded=True):
+    st.caption("Helps identify potential ID columns, categorical variables, and constants.")
+    
+    cardinality_data = []
+    for col in df.columns:
+        n_unique = df[col].nunique()
+        n_total = len(df)
+        pct_unique = (n_unique / n_total) * 100 if n_total > 0 else 0
+        
+        # Classify cardinality
+        if n_unique == 1:
+            card_type = "Constant"
+            card_flag = "⚠️"
+        elif n_unique == 2:
+            card_type = "Binary"
+            card_flag = ""
+        elif n_unique == n_total:
+            card_type = "Unique (potential ID)"
+            card_flag = "🔑"
+        elif n_unique <= 10:
+            card_type = "Low cardinality"
+            card_flag = ""
+        elif n_unique <= 50:
+            card_type = "Moderate cardinality"
+            card_flag = ""
+        elif pct_unique > 90:
+            card_type = "High cardinality (near-unique)"
+            card_flag = ""
+        else:
+            card_type = "High cardinality"
+            card_flag = ""
+        
+        cardinality_data.append({
+            'Column': col,
+            'Unique': n_unique,
+            '% Unique': f"{pct_unique:.1f}%",
+            'Type': card_type,
+            'Flag': card_flag
+        })
+    
+    card_df = pd.DataFrame(cardinality_data)
+    st.dataframe(card_df, width="stretch", hide_index=True)
+    audit_results['cardinality'] = cardinality_data
+    
+    # Warnings
+    constants = [c['Column'] for c in cardinality_data if c['Type'] == 'Constant']
+    if constants:
+        st.warning(f"**Constant columns detected:** {', '.join(constants)}. These provide no information and may be removed.")
+    
+    # Note: Potential ID columns are flagged in the cardinality table above
+
+# -------------------------------------------------------------------------
+# DATA TYPES & VALIDITY
+# -------------------------------------------------------------------------
+with st.expander("Data Types & Validity Checks", expanded=False):
+    st.subheader("Column Types")
+    
+    dtype_data = []
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        n_nonnull = df[col].count()
+        n_null = df[col].isnull().sum()
+        n_unique = df[col].nunique()
+        
+        # Sample values
+        sample_vals = df[col].dropna().head(3).tolist()
+        sample_str = str(sample_vals)[:50] + "..." if len(str(sample_vals)) > 50 else str(sample_vals)
+        
+        # Validity check
+        validity_issues = []
+        if n_null > 0:
+            validity_issues.append(f"{n_null} missing")
+        if dtype == 'object':
+            # Check for mixed types
+            try:
+                numeric_count = pd.to_numeric(df[col], errors='coerce').notna().sum()
+                if 0 < numeric_count < n_nonnull:
+                    validity_issues.append("mixed types")
+            except Exception:
+                pass
+        
+        dtype_data.append({
+            'Column': col,
+            'Type': dtype,
+            'Non-null': n_nonnull,
+            'Null': n_null,
+            'Unique': n_unique,
+            'Sample': sample_str,
+            'Issues': ', '.join(validity_issues) if validity_issues else 'OK'
+        })
+    
+    dtype_df = pd.DataFrame(dtype_data)
+    st.dataframe(dtype_df, width="stretch", hide_index=True)
+    audit_results['dtypes'] = dtype_data
+
+# -------------------------------------------------------------------------
+# MISSING VALUES DETAIL
+# -------------------------------------------------------------------------
+with st.expander("Missing Values Detail", expanded=False):
+    missing_counts = df.isnull().sum()
+    n_rows = len(df)
+    missing_pct = (missing_counts / n_rows) * 100 if n_rows > 0 else missing_counts * 0
+    missing_df = pd.DataFrame({
+        'Column': missing_counts.index,
+        'Missing Count': missing_counts.values,
+        'Missing %': [f"{p:.1f}%" for p in missing_pct.values]
+    })
+    missing_df = missing_df[missing_df['Missing Count'] > 0].sort_values('Missing Count', ascending=False)
+    
+    if len(missing_df) > 0:
+        st.dataframe(missing_df, width="stretch", hide_index=True)
+        audit_results['missing'] = missing_df.to_dict('records')
+        
+        # Missingness patterns
+        high_missing = missing_df[missing_pct[missing_df['Column']].values > 50]
+        if len(high_missing) > 0:
+            st.warning(f"**{len(high_missing)} column(s) have >50% missing values.** Consider removing or imputing.")
+    else:
+        st.success("No missing values in any column!")
+        audit_results['missing'] = []
+
+# -------------------------------------------------------------------------
+# DUPLICATES
+# -------------------------------------------------------------------------
+with st.expander("Duplicate Rows", expanded=False):
+    if n_duplicates > 0:
+        dup_pct = (n_duplicates / len(df) * 100) if len(df) > 0 else 0
+        st.warning(f"Found **{n_duplicates:,}** duplicate rows ({dup_pct:.1f}% of data)")
+        
+        # Show sample duplicates
+        dup_mask = df.duplicated(keep=False)
+        dup_sample = df[dup_mask].head(10)
+        st.dataframe(dup_sample, width="stretch")
+        st.caption("Sample of duplicate rows (showing first 10)")
+    else:
+        st.success("No duplicate rows found!")
+    audit_results['duplicates'] = n_duplicates
+
+# -------------------------------------------------------------------------
+# NUMERIC SUMMARY
+# -------------------------------------------------------------------------
+numeric_cols = get_numeric_columns(df)
+if numeric_cols:
+    with st.expander("Numeric Column Statistics", expanded=False):
+        numeric_stats = df[numeric_cols].describe().T
+        numeric_stats['skewness'] = df[numeric_cols].skew()
+        numeric_stats['kurtosis'] = df[numeric_cols].kurtosis()
+        st.dataframe(numeric_stats.round(3), width="stretch")
+        audit_results['numeric_stats'] = numeric_stats.to_dict()
+        
+        # Flag potential outliers
+        n_rows = len(df)
+        for col in numeric_cols:
+            q1 = df[col].quantile(0.25)
+            q3 = df[col].quantile(0.75)
+            iqr = q3 - q1
+            outlier_count = ((df[col] < q1 - 1.5*iqr) | (df[col] > q3 + 1.5*iqr)).sum()
+            if n_rows > 0 and outlier_count > n_rows * 0.05:  # More than 5% outliers
+                outlier_pct = (outlier_count / n_rows * 100)
+                st.info(f"**{col}**: {outlier_count} potential outliers ({outlier_pct:.1f}%)")
+
+# -------------------------------------------------------------------------
+# SUGGESTED ACTIONS
+# -------------------------------------------------------------------------
+constants_cols = [c['Column'] for c in audit_results.get('cardinality', []) if c['Type'] == 'Constant']
+n_rows = len(df)
+high_missing_cols = [
+    r['Column'] for r in audit_results.get('missing', [])
+    if n_rows > 0 and (r['Missing Count'] / n_rows * 100) > 50
+]
+cols_with_missing = [r['Column'] for r in audit_results.get('missing', []) if r['Missing Count'] > 0]
+has_duplicates = audit_results.get('duplicates', 0) > 0
+
+suggested_actions = []
+if constants_cols and len(constants_cols) < len(df.columns):
+    suggested_actions.append(("Drop constant columns", constants_cols, lambda d, cols=constants_cols: d.drop(columns=cols, errors='ignore')))
+if high_missing_cols and len(high_missing_cols) < len(df.columns):
+    suggested_actions.append(("Drop high-missing columns (>50%)", high_missing_cols, lambda d, cols=high_missing_cols: d.drop(columns=cols, errors='ignore')))
+if has_duplicates:
+    suggested_actions.append(("Drop duplicate rows", [], lambda d: d.drop_duplicates()))
+if cols_with_missing:
+    def _impute_missing(d):
+        out = d.copy()
+        for col in out.columns:
+            if out[col].isnull().any():
+                if pd.api.types.is_numeric_dtype(out[col]):
+                    out[col] = out[col].fillna(out[col].median())
+                else:
+                    mode_val = out[col].mode()
+                    out[col] = out[col].fillna(mode_val.iloc[0] if len(mode_val) > 0 else "")
+        return out
+    suggested_actions.append(("Impute missing values (median/mode)", cols_with_missing, _impute_missing))
+
+if suggested_actions:
+    with st.expander("Suggested Actions", expanded=True):
+        st.caption("One-click fixes based on audit findings. Each action updates your working table.")
+        for i, (label, cols, apply_fn) in enumerate(suggested_actions):
+            col_list = f": {', '.join(cols[:5])}{'...' if len(cols) > 5 else ''}" if cols else ""
+            if st.button(f"Apply: {label}{col_list}", key=f"apply_suggested_{i}"):
+                try:
+                    new_df = apply_fn(df)
+                    if len(new_df) == 0 or len(new_df.columns) == 0:
+                        st.error("This action would result in an empty dataset. Aborted.")
+                    else:
+                        st.session_state.working_table = new_df
+                        set_data(new_df)
+                        st.success(f"Applied: {label}. New shape: {new_df.shape[0]:,} rows × {new_df.shape[1]} columns")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to apply: {e}")
+                    logger.exception(e)
+
+st.session_state.data_audit = audit_results
+
+# ============================================================================
+# SECTION 5: TASK MODE & FIELD SELECTION
+# ============================================================================
+st.markdown("---")
+st.header("Step 5: Configure Analysis")
+
+# Task mode selection
+task_mode_options = {
+    "Prediction (ML Models)": "prediction",
+    "Hypothesis Testing (Statistical Tests)": "hypothesis_testing"
+}
+
+current_task_mode = st.session_state.get('task_mode', 'prediction')
+task_mode_idx = 0 if current_task_mode == 'prediction' else 1
+
+selected_task_mode_label = st.radio(
+    "What type of analysis do you want to perform?",
+    options=list(task_mode_options.keys()),
+    index=task_mode_idx,
+    key="task_mode_selection",
+    horizontal=True
+)
+
+task_mode = task_mode_options[selected_task_mode_label]
+st.session_state.task_mode = task_mode
+
+if task_mode == "prediction":
+    st.info("📊 **Prediction Mode**: Select a target variable and features to build predictive models.")
+    
+    # Field selection for prediction
+    numeric_cols, categorical_cols = get_selectable_columns(df)
+    all_cols = numeric_cols + categorical_cols
+    
+    if not all_cols:
+        st.error("No selectable columns found in the data.")
+        st.stop()
+    
+    # Target selection
+    existing_config = st.session_state.get('data_config')
+    existing_target = existing_config.target_col if existing_config else None
+    
+    target_idx = 0
+    if existing_target and existing_target in all_cols:
+        target_idx = all_cols.index(existing_target) + 1
+    
+    target_col = st.selectbox(
+        "Target Variable (what you want to predict)",
+        options=[''] + all_cols,
+        index=target_idx,
+        key="target_selectbox"
+    )
+    
+    # Feature selection with "Select All" option
+    if target_col:
+        feature_options = [c for c in all_cols if c != target_col]
+        n_available_features = len(feature_options)
+        
+        st.markdown(f"**Feature Variables** ({n_available_features} available)")
+        
+        # High-dimensional data warnings
+        if n_available_features > 100:
+            st.warning(f"""
+            **High-dimensional data detected:** {n_available_features} potential features.
+            
+            Considerations:
+            - EDA plots will only show the first 6-10 features in some views
+            - Correlation heatmaps may be hard to read with many features
+            - Some models may be slow to train
+            - Consider feature selection or dimensionality reduction
+            """)
+        elif n_available_features > 50:
+            st.info(f"""
+            **Note:** {n_available_features} features available. Some EDA visualizations 
+            will be limited to the first several features for readability.
+            """)
+        
+        # Select All / Clear All buttons
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("Select All Features", key="select_all_features"):
+                # Directly set the multiselect widget state
+                st.session_state.features_multiselect = feature_options
+                st.rerun()
+        with col2:
+            if st.button("Clear Selection", key="clear_features"):
+                st.session_state.features_multiselect = []
+                st.rerun()
+        
+        # Determine default selection (only used if widget hasn't been rendered yet)
+        existing_features = existing_config.feature_cols if existing_config else []
+        
+        if 'features_multiselect' not in st.session_state:
+            # First time rendering - set initial default
+            if existing_features:
+                default_features = [f for f in existing_features if f in feature_options]
+            else:
+                default_features = feature_options[:min(10, len(feature_options))]
+        else:
+            # Widget already exists, use its current value
+            default_features = [f for f in st.session_state.features_multiselect if f in feature_options]
+        
+        selected_features = st.multiselect(
+            "Select features to use as predictors",
+            options=feature_options,
+            default=default_features,
+            key="features_multiselect",
+            help=f"Select from {n_available_features} available features. Use 'Select All' to include everything."
+        )
+        
+        # Show selection summary
+        if selected_features:
+            st.caption(f"Selected {len(selected_features)} of {n_available_features} features")
+            
+            if len(selected_features) > 50:
+                st.info("""
+                **With many features selected:**
+                - Some EDA visualizations will be limited
+                - Consider if all features are necessary
+                - Training time may increase
+                """)
+    else:
+        selected_features = []
+        feature_options = []
+    
+    if target_col and selected_features:
+        # Task type detection
+        task_detection = st.session_state.get('task_type_detection', TaskTypeDetection())
+        existing_config = st.session_state.get('data_config')
+        
+        should_redetect = (
+            task_detection.detected is None or
+            existing_config is None or
+            existing_config.target_col != target_col
+        )
+        
+        if should_redetect:
+            with st.spinner("Detecting task type..."):
+                task_result = detect_task_type(df, target_col)
+                task_detection = TaskTypeDetection(
+                    detected=task_result['detected'],
+                    confidence=task_result['confidence'],
+                    reasons=task_result['reasons']
+                )
+                st.session_state.task_type_detection = task_detection
+        
+        # Show detection result
+        task_det = st.session_state.task_type_detection
+        if task_det.detected:
+            st.success(f"Detected task type: **{task_det.detected.title()}**")
+        
+        # Override option
+        with st.expander("Override Task Type"):
+            override = st.checkbox("Override auto-detected task type", key="task_override")
+            if override:
+                override_value = st.radio(
+                    "Task Type",
+                    ['regression', 'classification'],
+                    horizontal=True,
+                    key="task_override_radio"
+                )
+                task_detection.override_enabled = True
+                task_detection.override_value = override_value
+                st.session_state.task_type_detection = task_detection
+        
+        task_type_final = task_detection.final
+        
+        # Save configuration
+        data_config = DataConfig(
+            target_col=target_col,
+            feature_cols=selected_features,
+            task_type=task_type_final
+        )
+        st.session_state.data_config = data_config
+        
+        st.success(f"✅ Configuration saved: **{task_type_final.title()}** task with **{len(selected_features)}** features")
+        
+        # Next steps
+        st.markdown("---")
+        st.markdown("### Next Steps")
+        st.markdown("""
+        1. Go to **EDA** to explore your data
+        2. Go to **Preprocess** to build your preprocessing pipeline
+        3. Go to **Train & Compare** to train models
+        """)
+    else:
+        st.warning("Please select a target variable and at least one feature.")
+
+else:
+    st.info("🔬 **Hypothesis Testing Mode**: Run statistical tests on your variables.")
+    
+    st.session_state.data_config = DataConfig()  # Clear prediction config
+    
+    st.markdown("""
+    ### Available Tests
+    - **Correlation**: Test relationship between two numeric variables
+    - **Two-Sample Comparison**: Compare means between two groups
+    - **Multi-Group Comparison**: Compare means across multiple groups (ANOVA)
+    - **Categorical Association**: Test association between categorical variables (Chi-square)
+    - **Normality Test**: Check if a variable is normally distributed
+    
+    Go to the **Hypothesis Testing** page to run tests.
+    """)
+
+# ============================================================================
+# STATE DEBUG
+# ============================================================================
+with st.expander("Debug: Session State", expanded=False):
+    st.write(f"• Active Project: {active_project['name'] if active_project else 'None'}")
+    st.write(f"• Datasets in Project: {len(project_datasets)}")
+    st.write(f"• Working Table Shape: {df.shape if df is not None else 'None'}")
+    st.write(f"• Task Mode: {st.session_state.get('task_mode', 'None')}")
+    st.write(f"• Merge Steps: {len(st.session_state.get('merge_steps', []))}")
+    data_config = st.session_state.get('data_config')
+    st.write(f"• Target: {data_config.target_col if data_config else 'None'}")
+    st.write(f"• Features: {len(data_config.feature_cols) if data_config else 0}")
