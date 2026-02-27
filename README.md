@@ -44,16 +44,23 @@ A guided, interactive Streamlit application for researchers working with tabular
 ## Quick Start
 
 ```bash
-# Clone and install
+# Clone
 git clone https://github.com/hedglinnolan/glucose-mlp-interactive.git
 cd glucose-mlp-interactive
+
+# Option A: Automated setup
+chmod +x setup.sh && ./setup.sh
+source venv/bin/activate
+streamlit run app.py
+
+# Option B: Manual setup
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-
-# Run
 streamlit run app.py
 ```
+
+The app will open at **http://localhost:8501**.
 
 ## Requirements
 
