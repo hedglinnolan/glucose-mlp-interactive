@@ -9,7 +9,7 @@ PAGE_ORDER = [
     ("Home", "Home", "app.py"),
     ("01_Upload_and_Audit", "Upload & Audit", "pages/01_Upload_and_Audit.py"),
     ("02_EDA", "EDA", "pages/02_EDA.py"),
-    ("02b_Feature_Selection", "Feature Selection", "pages/02b_Feature_Selection.py"),
+    ("03_Feature_Selection", "Feature Selection", "pages/03_Feature_Selection.py"),
     ("03_Preprocess", "Preprocess", "pages/03_Preprocess.py"),
     ("04_Train_and_Compare", "Train & Compare", "pages/04_Train_and_Compare.py"),
     ("05_Explainability", "Explainability", "pages/05_Explainability.py"),

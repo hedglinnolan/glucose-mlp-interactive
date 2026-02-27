@@ -25,6 +25,7 @@ from ml.pipeline import (
 )
 from ml.model_registry import get_registry
 from data_processor import get_numeric_columns
+from utils.theme import inject_custom_css, render_step_indicator, render_guidance
 
 @st.cache_resource
 def _get_registry_cached():
@@ -33,8 +34,10 @@ from utils.widget_helpers import safe_option_index
 
 init_session_state()
 
-st.set_page_config(page_title="Preprocessing", page_icon=None, layout="wide")
-st.title("Preprocessing Builder")
+st.set_page_config(page_title="Preprocessing", page_icon="⚙️", layout="wide")
+inject_custom_css()
+render_step_indicator(4, "Preprocessing")
+st.title("⚙️ Preprocessing Builder")
 render_breadcrumb("03_Preprocess")
 render_page_navigation("03_Preprocess")
 
@@ -113,44 +116,120 @@ for key, spec in available_prep.items():
         model_groups_prep[g] = []
     model_groups_prep[g].append((key, spec))
 
+# Render model selection as styled cards in columns
+_GROUP_ICONS = {
+    "Linear": "📏", "Tree-based": "🌳", "Distance-based": "📍",
+    "Margin-based": "🔲", "Probabilistic": "🎲", "Neural": "🧠",
+}
 for group_name in sorted(model_groups_prep.keys()):
-    st.subheader(f"{group_name} models")
-    for model_key, spec in model_groups_prep[group_name]:
+    icon = _GROUP_ICONS.get(group_name, "📦")
+    st.markdown(f"#### {icon} {group_name}")
+    models_in_group = model_groups_prep[group_name]
+    cols = st.columns(min(len(models_in_group), 3))
+    for idx, (model_key, spec) in enumerate(models_in_group):
         ck = f"train_model_{model_key}"
-        st.checkbox(
-            spec.name,
-            value=st.session_state.get(ck, False),
-            key=ck,
-            help=(", ".join(spec.capabilities.notes) if spec.capabilities.notes else None),
-        )
+        with cols[idx % len(cols)]:
+            is_selected = st.session_state.get(ck, False)
+            border_color = "#667eea" if is_selected else "#e2e8f0"
+            bg_color = "#f0f0ff" if is_selected else "#ffffff"
+            notes_text = "; ".join(spec.capabilities.notes) if spec.capabilities.notes else ""
+            st.markdown(f"""
+            <div style="border: 2px solid {border_color}; border-radius: 10px; padding: 0.8rem;
+                        background: {bg_color}; margin-bottom: 0.5rem; transition: all 0.15s;">
+                <strong style="font-size: 0.95rem;">{spec.name}</strong>
+                {"<br/><span style='font-size: 0.78rem; color: #64748b;'>" + notes_text + "</span>" if notes_text else ""}
+            </div>
+            """, unsafe_allow_html=True)
+            st.checkbox(
+                "Select",
+                value=is_selected,
+                key=ck,
+                label_visibility="collapsed" if is_selected else "visible",
+            )
+
 selected_models = [k.replace("train_model_", "") for k, v in st.session_state.items() if k.startswith("train_model_") and v]
 if selected_models:
-    st.caption(f"**Selected:** {', '.join(selected_models)}. Each gets its own pipeline when you build.")
+    st.success(f"✅ **{len(selected_models)} model(s) selected:** {', '.join(m.upper() for m in selected_models)}")
 else:
-    st.caption("Select at least one model to build model-specific pipelines; otherwise a single default pipeline is built.")
+    st.info("Select at least one model above. Each gets its own preprocessing pipeline.")
 
 # ============================================================================
-# 2. INTERPRETABILITY (GLOBAL) + CONFIGURE PIPELINE PER MODEL
+# 2. PREPROCESSING CONFIGURATION
 # ============================================================================
 st.markdown("---")
-st.header("Configure pipeline per model")
-st.caption("Click a model to expand and set preprocessing options. Then scroll down and click **Build Pipelines** once.")
+st.header("⚙️ Configure Preprocessing")
 
 preprocessing_config = st.session_state.get("preprocessing_config", {}) or {}
 st.session_state.preprocessing_config = preprocessing_config
 
+# Simple vs Advanced mode toggle
+config_mode = st.radio(
+    "Configuration mode",
+    ["🟢 Smart Defaults (recommended)", "🔧 Advanced (full control)"],
+    index=0,
+    key="preprocess_config_mode",
+    horizontal=True,
+    help="Smart Defaults auto-configures based on your data and EDA findings. Advanced gives full control over every option.",
+)
+use_smart_defaults = "Smart" in config_mode
+
+if use_smart_defaults:
+    render_guidance(
+        "<strong>Smart Defaults</strong> will automatically configure preprocessing based on your data profile: "
+        "missing values → median imputation + missing indicators; "
+        "outliers detected → robust scaling; "
+        "linear models → standard scaling; "
+        "tree models → minimal preprocessing. "
+        "You can switch to Advanced mode anytime to fine-tune."
+    )
+
+    # Auto-detect best settings from EDA
+    _auto_scaling = "robust" if _eda_outliers else "standard"
+    _auto_imputation = "median"
+    _auto_missing_indicators = _eda_missing
+    _auto_outlier = "none"  # Let robust scaling handle outliers rather than clipping
+
+    st.markdown("**Auto-detected settings:**")
+    auto_cols = st.columns(3)
+    with auto_cols[0]:
+        st.markdown(f"- Scaling: **{_auto_scaling}**" + (" *(outliers detected)*" if _eda_outliers else ""))
+        st.markdown(f"- Imputation: **{_auto_imputation}**")
+    with auto_cols[1]:
+        st.markdown(f"- Missing indicators: **{'Yes' if _auto_missing_indicators else 'No'}**")
+        st.markdown(f"- Categorical: **one-hot encoding**")
+    with auto_cols[2]:
+        st.markdown(f"- Outlier treatment: **{_auto_outlier}**")
+        st.markdown(f"- Feature augmentation: **none**")
+
+    st.caption("These defaults are applied to all selected models. Model-specific adjustments (e.g., enabling scaling for SVM) are handled automatically.")
+
+# Interpretability preference (both modes)
 _imode_opts = ["high", "balanced", "performance"]
 _imode_stored = st.session_state.get("interpretability_mode", "balanced")
 _imode_idx = _imode_opts.index(_imode_stored) if _imode_stored in _imode_opts else 1
 interpretability_mode = st.selectbox(
-    "Interpretability preference (applies to all models)",
+    "Interpretability preference",
     _imode_opts,
     index=_imode_idx,
     key="interpretability_mode",
-    help="High disables log transform, PCA, KMeans. Balanced/Performance allow them.",
+    format_func=lambda x: {"high": "🔍 High (simple pipelines, no PCA/KMeans)", "balanced": "⚖️ Balanced (recommended)", "performance": "🚀 Performance (all transforms allowed)"}[x],
+    help="Controls whether advanced transforms (PCA, KMeans, log) are allowed. High keeps pipelines simple and explainable.",
 )
-with st.expander("Interpretability vs Performance", expanded=False):
-    st.markdown("**High:** Disables log, PCA, KMeans. **Performance:** Allows them. **Balanced:** Default.")
+
+# When using smart defaults, set session state values automatically
+if use_smart_defaults:
+    for _mk in (selected_models if selected_models else ["default"]):
+        st.session_state[f"preprocess_{_mk}_numeric_scaling"] = _auto_scaling
+        st.session_state[f"preprocess_{_mk}_numeric_imputation"] = _auto_imputation
+        st.session_state[f"preprocess_{_mk}_numeric_missing_indicators"] = _auto_missing_indicators
+        st.session_state[f"preprocess_{_mk}_numeric_outlier_treatment"] = _auto_outlier
+        st.session_state[f"preprocess_{_mk}_categorical_imputation"] = "most_frequent"
+        st.session_state[f"preprocess_{_mk}_categorical_encoding"] = "onehot"
+        st.session_state[f"preprocess_{_mk}_numeric_log_transform"] = False
+        st.session_state[f"preprocess_{_mk}_use_pca"] = False
+        st.session_state[f"preprocess_{_mk}_use_kmeans"] = False
+        st.session_state[f"preprocess_{_mk}_plausibility_gating"] = False
+        st.session_state[f"preprocess_{_mk}_unit_harmonization"] = False
 
 def _interpretability_guidance(
     profile: Optional[Any],

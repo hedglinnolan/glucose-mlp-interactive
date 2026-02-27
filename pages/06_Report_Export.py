@@ -26,8 +26,11 @@ logger = logging.getLogger(__name__)
 
 init_session_state()
 
-st.set_page_config(page_title="Report Export", page_icon=None, layout="wide")
-st.title("Report Export")
+from utils.theme import inject_custom_css, render_step_indicator, render_guidance
+st.set_page_config(page_title="Report Export", page_icon="📄", layout="wide")
+inject_custom_css()
+render_step_indicator(7, "Report Export")
+st.title("📄 Report Export")
 render_breadcrumb("06_Report_Export")
 render_page_navigation("06_Report_Export")
 
@@ -686,17 +689,71 @@ with st.expander("📄 Auto-Generated Methods Section", expanded=False):
     Generate a draft methods section based on your actual workflow choices.
     Fill in the `[PLACEHOLDER]` sections with study-specific details.
     """)
-    if st.button("Generate Methods Section", key="gen_methods"):
+    # Let user select which models to include in the report
+    all_model_names = list(trained_models.keys()) if trained_models else []
+    if all_model_names:
+        selected_for_report = st.multiselect(
+            "Models to include in report",
+            options=all_model_names,
+            default=all_model_names,
+            key="report_model_selection",
+            help="Select which models' results to include in the methods/results section.",
+        )
+    else:
+        selected_for_report = []
+
+    # Explainability methods to mention
+    available_explain = []
+    if st.session_state.get("permutation_importance"):
+        available_explain.append("permutation_importance")
+    if st.session_state.get("shap_values"):
+        available_explain.append("shap")
+    if st.session_state.get("bootstrap_results"):
+        available_explain.append("calibration")
+
+    if available_explain:
+        selected_explain = st.multiselect(
+            "Explainability methods to describe",
+            options=available_explain,
+            default=available_explain,
+            key="report_explain_selection",
+            help="Select which analyses to describe in the methods section.",
+        )
+    else:
+        selected_explain = []
+
+    # Best model selection
+    best_model = None
+    if selected_for_report:
+        best_model = st.selectbox(
+            "Best/primary model (highlighted in results)",
+            options=selected_for_report,
+            index=0,
+            key="report_best_model",
+        )
+
+    include_results = st.checkbox("Include draft Results section with actual metrics", value=True,
+                                   key="report_include_results",
+                                   help="Adds a Results section populated with your model's actual performance numbers and CIs.")
+
+    if st.button("Generate Methods Section", key="gen_methods", type="primary"):
         from ml.publication import generate_methods_section
         train_n = len(st.session_state.get('X_train', []))
         val_n = len(st.session_state.get('X_val', []))
         test_n = len(st.session_state.get('X_test', []))
         prep_config = st.session_state.get('preprocessing_config', {})
 
+        # Filter model results to selected models
+        selected_results = {k: v for k, v in model_results.items() if k in selected_for_report} if include_results else None
+        selected_bootstrap = {k: v for k, v in st.session_state.get("bootstrap_results", {}).items() if k in selected_for_report} if include_results else None
+
+        fs_results = st.session_state.get("feature_selection_results")
+        fs_method = fs_results[0].method if fs_results else None
+
         methods_text = generate_methods_section(
             data_config={},
             preprocessing_config=prep_config,
-            model_configs={name: {} for name in trained_models.keys()},
+            model_configs={name: {} for name in selected_for_report},
             split_config={},
             n_total=len(df),
             n_train=train_n,
@@ -706,7 +763,12 @@ with st.expander("📄 Auto-Generated Methods Section", expanded=False):
             target_name=data_config.target_col,
             task_type=data_config.task_type or "regression",
             metrics_used=list(next(iter(model_results.values()))['metrics'].keys()) if model_results else ["RMSE"],
-            feature_selection_method=st.session_state.get("feature_selection_results", [None])[0].method if st.session_state.get("feature_selection_results") else None,
+            feature_selection_method=fs_method,
+            selected_model_results=selected_results,
+            bootstrap_results=selected_bootstrap,
+            best_model_name=best_model,
+            explainability_methods=selected_explain,
+            random_seed=st.session_state.get("random_seed", 42),
         )
         st.session_state["methods_section"] = methods_text
 
@@ -740,8 +802,20 @@ with st.expander("📊 Sample Flow Diagram", expanded=False):
         st.session_state["flow_diagram"] = mermaid
 
     if st.session_state.get("flow_diagram"):
-        st.code(st.session_state["flow_diagram"], language="mermaid")
-        st.caption("Copy this Mermaid code into [mermaid.live](https://mermaid.live) to render or embed in your paper.")
+        mermaid_code = st.session_state["flow_diagram"]
+        st.text_area("Mermaid Diagram Code", value=mermaid_code, height=300, key="flow_mermaid_code",
+                     help="Select all and copy, or use the download button below.")
+        col_fd1, col_fd2 = st.columns(2)
+        with col_fd1:
+            st.download_button(
+                "📥 Download Mermaid Code",
+                mermaid_code,
+                "flow_diagram.mmd", "text/plain",
+                key="dl_flow_mermaid",
+            )
+        with col_fd2:
+            st.link_button("🔗 Open in Mermaid Live Editor", "https://mermaid.live")
+        st.caption("Paste the code into [mermaid.live](https://mermaid.live) to render as SVG/PNG for your paper.")
 
 # TRIPOD Checklist
 with st.expander("✅ TRIPOD Checklist", expanded=False):
@@ -787,6 +861,59 @@ with st.expander("✅ TRIPOD Checklist", expanded=False):
         "tripod_checklist.csv", "text/csv",
         key="dl_tripod",
     )
+
+# LaTeX Manuscript Template
+with st.expander("📝 LaTeX Manuscript Template", expanded=False):
+    st.markdown("""
+    Generate a **complete LaTeX manuscript** populated with your actual results.
+    Compile with `pdflatex` to produce a publication-ready PDF. All placeholders
+    are clearly marked with `[PLACEHOLDER]` for you to fill in study-specific details.
+    """)
+
+    col_lt1, col_lt2 = st.columns(2)
+    with col_lt1:
+        paper_title = st.text_input("Paper title", value="Prediction Model Development and Validation", key="latex_title")
+        authors = st.text_input("Authors", value="[Author Names]", key="latex_authors")
+    with col_lt2:
+        affiliation = st.text_input("Affiliation", value="[Institution]", key="latex_affiliation")
+
+    if st.button("Generate LaTeX Manuscript", key="gen_latex", type="primary"):
+        from ml.latex_report import generate_latex_report
+
+        train_n = len(st.session_state.get('X_train', []))
+        val_n = len(st.session_state.get('X_val', []))
+        test_n = len(st.session_state.get('X_test', []))
+        table1_df_local = st.session_state.get("table1_df")
+        methods_text = st.session_state.get("methods_section", "")
+        bootstrap_res = st.session_state.get("bootstrap_results")
+
+        latex_source = generate_latex_report(
+            title=paper_title,
+            authors=authors,
+            affiliation=affiliation,
+            methods_section=methods_text,
+            table1_df=table1_df_local,
+            model_results=model_results,
+            bootstrap_results=bootstrap_res,
+            task_type=data_config.task_type or "regression",
+            feature_names=data_config.feature_cols,
+            target_name=data_config.target_col,
+            n_total=len(df),
+            n_train=train_n,
+            n_val=val_n,
+            n_test=test_n,
+        )
+        st.session_state["latex_report"] = latex_source
+
+    if st.session_state.get("latex_report"):
+        st.text_area("LaTeX Source", value=st.session_state["latex_report"], height=400, key="latex_preview")
+        st.download_button(
+            "📥 Download LaTeX (.tex)",
+            st.session_state["latex_report"],
+            "manuscript.tex", "text/plain",
+            key="dl_latex",
+        )
+        st.caption("Compile with: `pdflatex manuscript.tex` · Requires `booktabs`, `natbib`, `hyperref` packages.")
 
 st.markdown("---")
 

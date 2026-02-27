@@ -1,4 +1,4 @@
-# Streamlit configuration
+# Streamlit configuration — Tabular ML Lab
 [server]
 port = 8501
 address = "localhost"
@@ -11,8 +11,8 @@ gatherUsageStats = false
 serverAddress = "localhost"
 
 [theme]
-primaryColor = "#1f77b4"
+primaryColor = "#667eea"
 backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f0f2f6"
-textColor = "#262730"
+secondaryBackgroundColor = "#f8f9ff"
+textColor = "#1e293b"
 font = "sans serif"

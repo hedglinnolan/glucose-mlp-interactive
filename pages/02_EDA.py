@@ -15,6 +15,7 @@ from utils.session_state import (
 )
 from utils.storyline import render_progress_indicator, add_insight, get_insights_by_category, render_breadcrumb, render_page_navigation
 from data_processor import get_numeric_columns
+from utils.theme import inject_custom_css, render_guidance, render_reviewer_concern, render_step_indicator
 from ml.eda_recommender import compute_dataset_signals, recommend_eda, DatasetSignals
 from ml import eda_actions
 from ml.plot_narrative import (
@@ -29,8 +30,10 @@ from ml.plot_narrative import (
 
 init_session_state()
 
-st.set_page_config(page_title="EDA", page_icon=None, layout="wide")
-st.title("Exploratory Data Analysis")
+st.set_page_config(page_title="EDA", page_icon="📈", layout="wide")
+inject_custom_css()
+render_step_indicator(2, "Exploratory Data Analysis")
+st.title("📈 Exploratory Data Analysis")
 render_breadcrumb("02_EDA")
 render_page_navigation("02_EDA")
 

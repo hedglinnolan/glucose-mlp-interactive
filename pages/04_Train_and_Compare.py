@@ -16,6 +16,7 @@ from utils.session_state import (
 )
 from utils.seed import set_global_seed, get_global_seed
 from utils.storyline import render_progress_indicator, get_insights_by_category, render_breadcrumb, render_page_navigation
+from utils.theme import inject_custom_css, render_guidance, render_reviewer_concern, render_step_indicator, render_metric_row
 from ml.splits import to_numpy_1d
 
 logger = logging.getLogger(__name__)
@@ -80,8 +81,10 @@ init_session_state()
 # Set global seed
 set_global_seed(st.session_state.get('random_seed', 42))
 
-st.set_page_config(page_title="Train & Compare", page_icon=None, layout="wide")
-st.title("Train & Compare Models")
+st.set_page_config(page_title="Train & Compare", page_icon="🧠", layout="wide")
+inject_custom_css()
+render_step_indicator(5, "Train & Compare Models")
+st.title("🧠 Train & Compare Models")
 render_breadcrumb("04_Train_and_Compare")
 render_page_navigation("04_Train_and_Compare")
 
@@ -491,36 +494,48 @@ for key, spec in available_models.items():
 # Sort groups by explainability order (most explainable first)
 sorted_groups = sorted(model_groups.keys(), key=lambda g: EXPLAINABILITY_ORDER.get(g, 999))
 
-# Display models by group, ordered by explainability
+# Display models by group, ordered by explainability — card layout
+_GROUP_ICONS_TC = {
+    "Linear": "📏", "Trees": "🌳", "Distance": "📍", "Boosting": "🚀",
+    "Margin": "🔲", "Probabilistic": "🎲", "Neural Net": "🧠",
+}
+_EXPLAIN_LABELS = {
+    "Linear": "High explainability", "Probabilistic": "High explainability",
+    "Trees": "Medium explainability", "Distance": "Medium explainability",
+    "Boosting": "Low-medium explainability", "Margin": "Low explainability",
+    "Neural Net": "Low explainability",
+}
+
 for group_name in sorted_groups:
-    st.subheader(f"{group_name} Models")
+    icon = _GROUP_ICONS_TC.get(group_name, "📦")
+    explain = _EXPLAIN_LABELS.get(group_name, "")
+    st.markdown(f"#### {icon} {group_name}" + (f" <span style='font-size:0.8rem; color:#94a3b8; margin-left:0.5rem;'>({explain})</span>" if explain else ""), unsafe_allow_html=True)
     group_models = model_groups[group_name]
-    
-    for model_key, spec in group_models:
-        # Check if model is selected
+    cols = st.columns(min(len(group_models), 3))
+
+    for idx, (model_key, spec) in enumerate(group_models):
         checkbox_key = f"train_model_{model_key}"
-        # Initialize in session_state if not present to avoid widget conflicts
         if checkbox_key not in st.session_state:
             st.session_state[checkbox_key] = False
-        
-        is_selected = st.checkbox(
-            spec.name,
-            value=st.session_state[checkbox_key],
-            key=checkbox_key,
-            help=", ".join(spec.capabilities.notes) if spec.capabilities.notes else None
-        )
-        
-        # Check if this model was preprocessed
-        # _prep_built contains the list of models that were specifically selected during preprocessing
-        # (it excludes "default" pipeline, so it's the definitive list of preprocessed models)
-        model_has_preprocessing = model_key in _prep_built
-        
-        # Show warning banner directly underneath checkbox if model is selected but wasn't preprocessed
-        # Only show if some models were preprocessed (len(_prep_built) > 0) to avoid redundant warnings
-        # when no preprocessing exists at all (in which case the general warning at top is shown)
-        if is_selected and not model_has_preprocessing and len(_prep_built) > 0:
-            st.warning(f"⚠️ **Warning:** {spec.name} was not selected during preprocessing. This model will train on raw, unprocessed data, which may result in suboptimal performance.")
-        
+
+        with cols[idx % len(cols)]:
+            is_selected = st.session_state[checkbox_key]
+            model_has_preprocessing = model_key in _prep_built
+            border = "#667eea" if is_selected else "#e2e8f0"
+            bg = "#f0f0ff" if is_selected else "#fff"
+            prep_badge = "✅ Preprocessed" if model_has_preprocessing else "⚠️ No pipeline"
+            prep_color = "#22c55e" if model_has_preprocessing else "#f59e0b"
+            notes = "; ".join(spec.capabilities.notes) if spec.capabilities.notes else ""
+            st.markdown(f"""
+            <div style="border: 2px solid {border}; border-radius: 10px; padding: 0.75rem;
+                        background: {bg}; margin-bottom: 0.4rem; min-height: 80px;">
+                <strong>{spec.name}</strong>
+                <span style="float:right; font-size:0.7rem; color:{prep_color};">{prep_badge if _has_preprocessing else ""}</span>
+                {"<br/><span style='font-size:0.78rem; color:#64748b;'>" + notes + "</span>" if notes else ""}
+            </div>
+            """, unsafe_allow_html=True)
+            is_selected = st.checkbox("Select", value=is_selected, key=checkbox_key, label_visibility="collapsed")
+
         if is_selected:
             models_to_train.append(model_key)
             

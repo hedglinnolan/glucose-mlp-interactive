@@ -1,5 +1,5 @@
 """
-Page 02b: Feature Selection
+Page 03: Feature Selection
 LASSO path, RFE-CV, univariate screening, stability selection.
 Results feed into preprocessing for recommended feature sets.
 """
@@ -10,15 +10,18 @@ from typing import List, Dict
 
 from utils.session_state import init_session_state, get_data, DataConfig
 from utils.storyline import render_progress_indicator, render_breadcrumb, render_page_navigation
+from utils.theme import inject_custom_css, render_guidance, render_reviewer_concern, render_step_indicator
 from data_processor import get_numeric_columns
 
 init_session_state()
 
-st.set_page_config(page_title="Feature Selection", page_icon="🔬", layout="wide")
-st.title("Feature Selection")
-render_breadcrumb("02b_Feature_Selection")
-render_page_navigation("02b_Feature_Selection")
-render_progress_indicator("02b_Feature_Selection")
+st.set_page_config(page_title="Feature Selection", page_icon="🎯", layout="wide")
+inject_custom_css()
+render_step_indicator(3, "Feature Selection")
+st.title("🎯 Feature Selection")
+render_breadcrumb("03_Feature_Selection")
+render_page_navigation("03_Feature_Selection")
+render_progress_indicator("03_Feature_Selection")
 
 # Prerequisites
 df = get_data()
@@ -48,15 +51,16 @@ if len(numeric_features) < 2:
 
 task_type = data_config.task_type or "regression"
 
-st.markdown("""
-**Why feature selection matters:**
-Feature selection identifies the most informative predictors, reducing overfitting
-and improving model interpretability. Using multiple methods and checking consensus
-gives reviewers confidence that your variable selection is robust.
-""")
+render_guidance(
+    "<strong>Why feature selection matters:</strong> Identifying the most informative predictors reduces overfitting, "
+    "improves interpretability, and gives peer reviewers confidence that your variable selection is robust. "
+    "Running multiple methods and checking <strong>consensus</strong> is best practice."
+)
+render_reviewer_concern(
+    "Reviewers often ask: 'How did you select your variables?' Having multiple methods agree gives you a defensible answer."
+)
 
-st.info(f"**{len(numeric_features)} numeric features** available for selection. "
-        f"Target: `{target_col}` ({task_type}).")
+st.info(f"📊 **{len(numeric_features)} numeric features** available for selection · Target: `{target_col}` ({task_type})")
 
 # Prepare data (drop missing target)
 mask = df[target_col].notna()

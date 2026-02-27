@@ -95,6 +95,13 @@ def generate_methods_section(
     feature_selection_method: Optional[str] = None,
     missing_data_strategy: Optional[str] = None,
     external_validation: bool = False,
+    # NEW: actual results for a richer methods/results section
+    selected_model_results: Optional[Dict[str, Dict]] = None,
+    bootstrap_results: Optional[Dict[str, Dict]] = None,
+    best_model_name: Optional[str] = None,
+    explainability_methods: Optional[List[str]] = None,
+    calibration_results: Optional[Dict[str, Any]] = None,
+    random_seed: int = 42,
 ) -> str:
     """Generate a draft methods section for a publication.
 
@@ -176,13 +183,67 @@ def generate_methods_section(
             "External validation was performed on an independent dataset. "
         )
 
+    # Explainability
+    if explainability_methods:
+        sections.append("\n\n### Model Interpretability\n")
+        method_descriptions = {
+            "permutation_importance": "Permutation importance was computed to assess feature contributions by measuring the decrease in model performance when each feature was randomly shuffled.",
+            "shap": "SHapley Additive exPlanations (SHAP) values were computed to quantify the contribution of each feature to individual predictions.",
+            "partial_dependence": "Partial dependence plots were generated to visualize the marginal effect of individual features on the predicted outcome.",
+            "calibration": "Model calibration was assessed using reliability diagrams, Brier score, and expected calibration error (ECE).",
+            "subgroup": "Subgroup analysis was performed to evaluate model performance across clinically relevant subgroups.",
+            "decision_curve": "Decision curve analysis was performed to assess the clinical utility of the model at various probability thresholds.",
+        }
+        for method in explainability_methods:
+            desc = method_descriptions.get(method, f"{method} analysis was performed.")
+            sections.append(f"{desc} ")
+
     # Software
     sections.append("\n\n### Software\n")
     sections.append(
-        "All analyses were performed using Python (version 3.x) with "
-        "scikit-learn, NumPy, pandas, and SciPy. "
-        "[PLACEHOLDER: Add specific software versions from the reproducibility manifest.]"
+        f"All analyses were performed using Python (version 3.x) with "
+        f"scikit-learn, NumPy, pandas, and SciPy. "
+        f"Random seed was set to {random_seed} for reproducibility. "
+        f"[PLACEHOLDER: Add specific software versions from the reproducibility manifest.]"
     )
+
+    # ── Results Section (if actual results provided) ──
+    if selected_model_results:
+        sections.append("\n\n---\n\n## Results (Draft)\n")
+        sections.append(f"\n### Model Performance\n")
+
+        if best_model_name:
+            sections.append(f"The best-performing model was **{best_model_name.upper()}**. ")
+
+        sections.append("Table X presents the performance of all evaluated models on the held-out test set.\n\n")
+
+        # Build a text table
+        for name, res in selected_model_results.items():
+            metrics = res.get("metrics", {})
+            cis = bootstrap_results.get(name, {}) if bootstrap_results else {}
+            metric_strs = []
+            for m, v in metrics.items():
+                ci = cis.get(m)
+                if ci and hasattr(ci, 'ci_lower'):
+                    metric_strs.append(f"{m}: {v:.4f} (95% CI: {ci.ci_lower:.4f}–{ci.ci_upper:.4f})")
+                else:
+                    metric_strs.append(f"{m}: {v:.4f}")
+            sections.append(f"**{name.upper()}:** {'; '.join(metric_strs)}\n\n")
+
+        # Calibration
+        if calibration_results:
+            sections.append("\n### Calibration\n")
+            for model_name, cal in calibration_results.items():
+                if hasattr(cal, 'brier_score') and cal.brier_score is not None:
+                    sections.append(
+                        f"**{model_name}:** Brier score = {cal.brier_score:.4f}, "
+                        f"ECE = {cal.ece:.4f}.\n\n"
+                    )
+                elif hasattr(cal, 'calibration_slope') and cal.calibration_slope is not None:
+                    sections.append(
+                        f"**{model_name}:** Calibration slope = {cal.calibration_slope:.3f}, "
+                        f"intercept = {cal.calibration_intercept:.3f}.\n\n"
+                    )
 
     return "".join(sections)
 

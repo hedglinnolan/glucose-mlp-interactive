@@ -18,6 +18,7 @@ from utils.session_state import (
 from utils.storyline import render_progress_indicator, render_breadcrumb, render_page_navigation
 from ml.estimator_utils import is_estimator_fitted
 from ml.model_registry import get_registry
+from utils.theme import inject_custom_css, render_step_indicator, render_guidance, render_reviewer_concern
 from sklearn.pipeline import Pipeline as SklearnPipeline
 
 @st.cache_resource
@@ -28,8 +29,10 @@ logger = logging.getLogger(__name__)
 
 init_session_state()
 
-st.set_page_config(page_title="Explainability", page_icon=None, layout="wide")
-st.title("Model Explainability")
+st.set_page_config(page_title="Explainability", page_icon="🔬", layout="wide")
+inject_custom_css()
+render_step_indicator(6, "Explain & Validate")
+st.title("🔬 Explain & Validate")
 render_breadcrumb("05_Explainability")
 render_page_navigation("05_Explainability")
 
