@@ -269,7 +269,7 @@ def _call_llm(
     Returns the response text or None on error.
     """
     if backend == "ollama":
-        return _call_ollama(context, system_prompt, model or "llama3.2", ollama_url)
+        return _call_ollama(context, system_prompt, model or "llama3.1:8b", ollama_url)
     elif backend == "openai":
         return _call_openai(context, system_prompt, model or "gpt-4o-mini", api_key)
     elif backend == "anthropic":
@@ -373,11 +373,11 @@ def render_llm_settings_sidebar():
         if backend == "ollama":
             st.text_input(
                 "Ollama model",
-                value=st.session_state.get("ollama_model", "llama3.2"),
+                value=st.session_state.get("ollama_model", "llama3.1:8b"),
                 key="ollama_model",
-                help="Model name (e.g., llama3.2, mistral, gemma2)",
+                help="Model name (e.g., llama3.1:8b, mistral, gemma2)",
             )
-            st.caption("Run `ollama serve` locally and `ollama pull <model>` to set up.")
+            st.caption("Ollama is running locally on this server — no API key needed.")
         elif backend == "openai":
             st.text_input(
                 "OpenAI API Key",
