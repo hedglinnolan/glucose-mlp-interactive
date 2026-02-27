@@ -455,7 +455,7 @@ def render_interpretation_with_llm_button(
         ollama_url = "http://localhost:11434"
 
         if backend == "ollama":
-            model = st.session_state.get("ollama_model", "llama3.2")
+            model = st.session_state.get("ollama_model", "llama3.1:8b")
         elif backend == "openai":
             model = st.session_state.get("openai_model", "gpt-4o-mini")
             api_key = st.session_state.get("openai_api_key", "")
@@ -481,6 +481,7 @@ def render_interpretation_with_llm_button(
             st.session_state[sk] = result
         else:
             st.session_state[sk] = "__error__"
+            logger.error(f"LLM call returned None: backend={backend}, model={model}")
         st.rerun()
 
     # Display result
@@ -494,8 +495,11 @@ def render_interpretation_with_llm_button(
             "(3) Pull a model: `ollama pull llama3.2`."
         )
     elif res == "__error__":
-        st.caption(
-            f"Could not get interpretation. Check your LLM configuration in the sidebar."
+        st.warning(
+            f"Could not get interpretation. Check sidebar LLM Settings. "
+            f"Current: backend={st.session_state.get('llm_backend', 'ollama')}, "
+            f"model={st.session_state.get('ollama_model', 'llama3.1:8b')}. "
+            f"Verify Ollama is running: `curl http://localhost:11434/api/tags`"
         )
     elif res:
         st.markdown(f"**🔬 AI Interpretation:**\n\n{res}")

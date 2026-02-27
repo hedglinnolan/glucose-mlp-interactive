@@ -554,16 +554,28 @@ with st.expander("Generate Table 1", expanded=False):
     )
 
     # Variable selection
+    # Clear stale Table 1 widget state if columns changed
+    for _wk in ("table1_continuous", "table1_categorical", "table1_group"):
+        _old = st.session_state.get(_wk)
+        if isinstance(_old, list):
+            st.session_state[_wk] = [v for v in _old if v in df.columns]
+        elif isinstance(_old, str) and _old not in ("None",) and _old not in df.columns:
+            st.session_state.pop(_wk, None)
+
+    _t1_cont_options = [c for c in all_numeric if c != target_col]
+    _t1_cont_default = [c for c in feature_cols if c in all_numeric and c in _t1_cont_options][:10]
     t1_continuous = st.multiselect(
         "Continuous variables",
-        options=[c for c in all_numeric if c != target_col],
-        default=[c for c in feature_cols if c in all_numeric][:10],
+        options=_t1_cont_options,
+        default=_t1_cont_default,
         key="table1_continuous",
     )
+    _t1_cat_options = [c for c in all_categorical if c != target_col and c != grouping_var]
+    _t1_cat_default = [c for c in feature_cols if c in all_categorical and c in _t1_cat_options][:5]
     t1_categorical = st.multiselect(
         "Categorical variables",
-        options=[c for c in all_categorical if c != target_col and c != grouping_var],
-        default=[c for c in feature_cols if c in all_categorical][:5],
+        options=_t1_cat_options,
+        default=_t1_cat_default,
         key="table1_categorical",
     )
 
