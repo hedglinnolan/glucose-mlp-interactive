@@ -7,9 +7,24 @@ import pandas as pd
 import numpy as np
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler, RobustScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler, OneHotEncoder, OrdinalEncoder, PowerTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer
+
+# IterativeImputer (MICE) is experimental in scikit-learn
+try:
+    from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+    from sklearn.impute import IterativeImputer
+    _HAS_ITERATIVE = True
+except ImportError:
+    _HAS_ITERATIVE = False
+
+# TargetEncoder available in scikit-learn >= 1.3
+try:
+    from sklearn.preprocessing import TargetEncoder
+    _HAS_TARGET_ENCODER = True
+except ImportError:
+    _HAS_TARGET_ENCODER = False
 from ml.feature_steps import create_pca_step, KMeansFeatures
 from ml.preprocess_operators import UnitHarmonizer, PlausibilityGate, OutlierCapping, plausibility_row_mask
 from ml.clinical_units import infer_unit, CLINICAL_VARIABLES
@@ -113,8 +128,9 @@ def build_preprocessing_pipeline(
     numeric_features: List[str],
     categorical_features: List[str],
     numeric_imputation: str = 'median',  # 'mean', 'median', 'constant'
-    numeric_scaling: str = 'standard',  # 'standard', 'robust', 'none'
+    numeric_scaling: str = 'standard',  # 'standard', 'robust', 'minmax', 'none'
     numeric_log_transform: bool = False,
+    numeric_power_transform: str = 'none',  # 'none', 'log1p', 'yeo-johnson'
     numeric_missing_indicators: bool = False,
     numeric_outlier_treatment: str = 'none',  # 'none', 'percentile', 'mad'
     numeric_outlier_params: Optional[Dict[str, Any]] = None,
@@ -171,15 +187,25 @@ def build_preprocessing_pipeline(
             ))
 
         # Imputation
-        if numeric_imputation == 'mean':
+        if numeric_imputation == 'iterative' and _HAS_ITERATIVE:
+            numeric_steps.append(('imputer', IterativeImputer(
+                max_iter=10, random_state=random_state,
+                add_indicator=numeric_missing_indicators,
+            )))
+        elif numeric_imputation == 'mean':
             numeric_steps.append(('imputer', SimpleImputer(strategy='mean', add_indicator=numeric_missing_indicators)))
         elif numeric_imputation == 'median':
             numeric_steps.append(('imputer', SimpleImputer(strategy='median', add_indicator=numeric_missing_indicators)))
         elif numeric_imputation == 'constant':
             numeric_steps.append(('imputer', SimpleImputer(strategy='constant', fill_value=0, add_indicator=numeric_missing_indicators)))
+        elif numeric_imputation == 'iterative' and not _HAS_ITERATIVE:
+            # Fallback if IterativeImputer not available
+            numeric_steps.append(('imputer', SimpleImputer(strategy='median', add_indicator=numeric_missing_indicators)))
         
-        # Log transform (optional)
-        if numeric_log_transform:
+        # Power transform (optional)
+        if numeric_power_transform == 'yeo-johnson':
+            numeric_steps.append(('power_transform', PowerTransformer(method='yeo-johnson', standardize=False)))
+        elif numeric_log_transform or numeric_power_transform == 'log1p':
             def log_transform(X):
                 return np.log1p(np.maximum(X, 0))  # log1p handles zeros
             numeric_steps.append(('log', FunctionTransformer(log_transform)))
@@ -196,6 +222,8 @@ def build_preprocessing_pipeline(
             numeric_steps.append(('scaler', StandardScaler()))
         elif numeric_scaling == 'robust':
             numeric_steps.append(('scaler', RobustScaler()))
+        elif numeric_scaling == 'minmax':
+            numeric_steps.append(('scaler', MinMaxScaler()))
         # 'none' means no scaling
         
         numeric_pipeline = Pipeline(numeric_steps)
@@ -212,14 +240,23 @@ def build_preprocessing_pipeline(
             categorical_steps.append(('imputer', SimpleImputer(strategy='constant', fill_value='missing')))
         
         # Encoding
-        if categorical_encoding == 'onehot':
-            # Use sparse_output=True for memory efficiency, convert only when needed
-            categorical_steps.append(('encoder', OneHotEncoder(
-                sparse_output=True,  # Sparse for memory efficiency
-                handle_unknown=handle_unknown,
-                drop='if_binary'  # Drop one column for binary features
+        if categorical_encoding == 'target' and _HAS_TARGET_ENCODER:
+            categorical_steps.append(('encoder', TargetEncoder(
+                smooth='auto',
+                target_type='auto',
             )))
-        # Note: Target encoding would require target variable, handled separately if needed
+        elif categorical_encoding == 'ordinal':
+            categorical_steps.append(('encoder', OrdinalEncoder(
+                handle_unknown='use_encoded_value',
+                unknown_value=-1,
+            )))
+        else:
+            # Default: one-hot
+            categorical_steps.append(('encoder', OneHotEncoder(
+                sparse_output=True,
+                handle_unknown=handle_unknown,
+                drop='if_binary',
+            )))
         
         categorical_pipeline = Pipeline(categorical_steps)
         transformers.append(('categorical', categorical_pipeline, categorical_features))

@@ -218,11 +218,15 @@ interpretability_mode = st.selectbox(
 
 # When using smart defaults, set session state values automatically
 if use_smart_defaults:
+    # Smart defaults: auto-upgrade scaling for models that need it
     for _mk in (selected_models if selected_models else ["default"]):
-        st.session_state[f"preprocess_{_mk}_numeric_scaling"] = _auto_scaling
+        _spec = registry_prep.get(_mk)
+        _needs_scale = _spec and _spec.capabilities and getattr(_spec.capabilities, "requires_scaled_numeric", False)
+        st.session_state[f"preprocess_{_mk}_numeric_scaling"] = "standard" if _needs_scale else _auto_scaling
         st.session_state[f"preprocess_{_mk}_numeric_imputation"] = _auto_imputation
         st.session_state[f"preprocess_{_mk}_numeric_missing_indicators"] = _auto_missing_indicators
         st.session_state[f"preprocess_{_mk}_numeric_outlier_treatment"] = _auto_outlier
+        st.session_state[f"preprocess_{_mk}_numeric_power_transform"] = "none"
         st.session_state[f"preprocess_{_mk}_categorical_imputation"] = "most_frequent"
         st.session_state[f"preprocess_{_mk}_categorical_encoding"] = "onehot"
         st.session_state[f"preprocess_{_mk}_numeric_log_transform"] = False
@@ -276,95 +280,269 @@ def _cfg(mk: str, key: str, default: Any, from_global: bool = True) -> Any:
         return preprocessing_config.get(key, default)
     return default
 
-for _mk in _config_keys:
-    with st.expander(f"Configure {_mk.upper()}", expanded=False):
-        # Slicing / cutting
-        st.subheader("Slicing / cutting")
-        if _eda_outliers:
-            st.caption("EDA found outliers; consider outlier treatment or plausibility gating.")
-        _c1, _c2 = st.columns(2)
-        with _c1:
-            if numeric_features:
-                _opt = ["none", "percentile", "mad"]
-                _v = _cfg(_mk, "numeric_outlier_treatment", "none")
-                _idx = _opt.index(_v) if _v in _opt else 0
-                _ot = st.selectbox("Outlier treatment", _opt, index=_idx, key=f"preprocess_{_mk}_numeric_outlier_treatment")
-                if _ot == "percentile":
-                    st.number_input("Lower percentile", 0.0, 0.1, 0.01, key=f"preprocess_{_mk}_outlier_lower_q")
-                    st.number_input("Upper percentile", 0.9, 1.0, 0.99, key=f"preprocess_{_mk}_outlier_upper_q")
-                elif _ot == "mad":
-                    st.number_input("MAD threshold", 2.0, 6.0, 3.5, key=f"preprocess_{_mk}_outlier_mad_threshold")
-            else:
-                _ot = "none"
-        with _c2:
-            _pg = st.checkbox("Plausibility gating (NHANES)", value=bool(_cfg(_mk, "plausibility_gating", False)), key=f"preprocess_{_mk}_plausibility_gating")
-            if _pg:
-                _pm = safe_option_index(["clip", "filter"], _cfg(_mk, "plausibility_mode", "clip"), "clip")
-                st.radio(
-                    "Plausibility mode",
-                    ["clip", "filter"],
-                    index=_pm,
-                    format_func=lambda x: "Clip out-of-range to NaN" if x == "clip" else "Keep only rows within NHANES range",
-                    key=f"preprocess_{_mk}_plausibility_mode",
-                    horizontal=True,
+if use_smart_defaults:
+    pass  # Smart defaults already set in session state above; skip manual config
+else:
+    st.markdown("---")
+    st.subheader("Per-Model Configuration")
+    st.caption("Expand each model to customize its preprocessing pipeline. Settings apply per-model so you can tailor preprocessing to each algorithm's needs.")
+
+    # Helper: detect high-cardinality categoricals
+    _high_card_feats = [f for f in categorical_features if df[f].nunique() > 10] if categorical_features else []
+
+    for _mk in _config_keys:
+        with st.expander(f"🔧 Configure {_mk.upper()}", expanded=(len(_config_keys) == 1)):
+
+            # ── 1. 🧹 Handle Missing Data ──
+            st.markdown("#### 🧹 Handle Missing Data")
+            st.caption("*Why it matters:* Most models cannot handle NaN values. How you fill gaps affects both accuracy and what your results mean — reviewers will scrutinize this.")
+            if _eda_missing:
+                _miss_pct = getattr(profile, 'missing_pct_overall', None)
+                _miss_msg = f"⚠️ EDA detected missing values" + (f" (~{_miss_pct:.1f}% overall)" if _miss_pct else "") + "."
+                if _miss_pct and _miss_pct > 5:
+                    _miss_msg += " With >5% missingness, consider **MICE** for publication-grade imputation."
+                st.warning(_miss_msg)
+            _c_miss1, _c_miss2 = st.columns(2)
+            with _c_miss1:
+                _imp_options = ["median", "mean", "iterative (MICE)", "constant"]
+                _imp_help = {
+                    "median": "Robust to skewed distributions. Most common default.",
+                    "mean": "Assumes symmetry. Sensitive to outliers — use only if features are roughly Gaussian.",
+                    "iterative (MICE)": "Gold standard for clinical research. Models each feature conditioned on others. Recommended when >5% data is missing (Rubin, 1987).",
+                    "constant": "Fills with a fixed value (e.g., 0). Use when missingness has domain meaning.",
+                }
+                _stored_imp = _cfg(_mk, "numeric_imputation", "median")
+                if _stored_imp == "iterative":
+                    _stored_imp = "iterative (MICE)"
+                _nim = safe_option_index(_imp_options, _stored_imp, "median")
+                _sel_imp = st.selectbox(
+                    "Numeric imputation",
+                    _imp_options,
+                    index=_nim,
+                    key=f"preprocess_{_mk}_numeric_imputation_display",
+                    help="How to fill missing numeric values before modeling.",
                 )
-            st.checkbox("Unit harmonization", value=bool(_cfg(_mk, "unit_harmonization", False)), key=f"preprocess_{_mk}_unit_harmonization")
+                # Map display value back to internal key
+                _imp_internal = "iterative" if "MICE" in _sel_imp else _sel_imp
+                st.session_state[f"preprocess_{_mk}_numeric_imputation"] = _imp_internal
+                st.caption(f"ℹ️ {_imp_help.get(_sel_imp, '')}")
+                st.checkbox(
+                    "Add missing-data indicator columns",
+                    value=bool(_cfg(_mk, "numeric_missing_indicators", False)),
+                    key=f"preprocess_{_mk}_numeric_missing_indicators",
+                    help="Adds binary columns (feature_missing = 0/1) so the model can learn whether missingness itself is informative (MNAR pattern).",
+                )
+            with _c_miss2:
+                _cim = safe_option_index(["most_frequent", "constant"], _cfg(_mk, "categorical_imputation", "most_frequent"), "most_frequent")
+                st.selectbox(
+                    "Categorical imputation",
+                    ["most_frequent", "constant"],
+                    index=_cim,
+                    key=f"preprocess_{_mk}_categorical_imputation",
+                    help="'Most frequent' fills with the mode. 'Constant' fills with a placeholder category.",
+                )
 
-        # Imputing
-        st.subheader("Imputing")
-        if _eda_missing:
-            st.caption("EDA found missing values; consider imputation and/or missing indicators.")
-        _c3, _c4 = st.columns(2)
-        with _c3:
-            _nim = safe_option_index(["median", "mean", "constant"], _cfg(_mk, "numeric_imputation", "median"), "median")
-            st.selectbox("Numeric imputation", ["median", "mean", "constant"], index=_nim, key=f"preprocess_{_mk}_numeric_imputation")
-            st.checkbox("Add missing indicators", value=bool(_cfg(_mk, "numeric_missing_indicators", False)), key=f"preprocess_{_mk}_numeric_missing_indicators")
-        with _c4:
-            _cim = safe_option_index(["most_frequent", "constant"], _cfg(_mk, "categorical_imputation", "most_frequent"), "most_frequent")
-            st.selectbox("Categorical imputation", ["most_frequent", "constant"], index=_cim, key=f"preprocess_{_mk}_categorical_imputation")
+            # ── 2. 📏 Scale & Transform ──
+            st.markdown("#### 📏 Scale & Transform")
+            st.caption("*Why it matters:* Linear models, SVMs, and neural nets are sensitive to feature scale. Tree-based models (Random Forest, XGBoost) are scale-invariant — scaling won't hurt but is unnecessary.")
+            _scale_options = ["standard", "robust", "minmax", "none"]
+            _scale_help = {
+                "standard": "Zero-mean, unit-variance (z-score). Best when features are roughly Gaussian. Sensitive to outliers.",
+                "robust": "Median/IQR-based. Resistant to outliers — recommended when EDA found outliers.",
+                "minmax": "Scales to [0, 1] range. Useful for neural nets. Sensitive to outliers.",
+                "none": "No scaling. Fine for tree/ensemble models. Preserves raw coefficient interpretation.",
+            }
+            _scl = safe_option_index(_scale_options, _cfg(_mk, "numeric_scaling", "standard"), "standard")
+            _sel_scale = st.selectbox(
+                "Scaling method",
+                _scale_options,
+                index=_scl,
+                key=f"preprocess_{_mk}_numeric_scaling",
+                format_func=lambda x: {"standard": "Standard (z-score)", "robust": "Robust (median/IQR)", "minmax": "Min-Max [0,1]", "none": "None (raw values)"}[x],
+            )
+            st.caption(f"ℹ️ {_scale_help.get(_sel_scale, '')}")
+            if _eda_outliers and _sel_scale == "standard":
+                st.warning("⚠️ EDA found outliers — consider **Robust** scaling instead. Standard scaling uses mean/std which are distorted by outliers.")
 
-        # Transformations
-        st.subheader("Transformations")
-        _scl = safe_option_index(["standard", "robust", "none"], _cfg(_mk, "numeric_scaling", "standard"), "standard")
-        st.selectbox("Scaling", ["standard", "robust", "none"], index=_scl, key=f"preprocess_{_mk}_numeric_scaling")
-        st.checkbox("Log transform (log(1+x))", value=bool(_cfg(_mk, "numeric_log_transform", False)), key=f"preprocess_{_mk}_numeric_log_transform")
+            _transform_options = ["none", "log1p", "yeo-johnson"]
+            _transform_help = {
+                "none": "No power transform applied.",
+                "log1p": "log(1+x). Compresses right-skewed distributions. Requires non-negative values.",
+                "yeo-johnson": "Automatically optimizes the transform parameter. Handles negative values. More general than log — preferred for publication (Box & Cox, 1964; Yeo & Johnson, 2000).",
+            }
+            _stored_transform = _cfg(_mk, "numeric_power_transform", "none")
+            # Backward compat: old log_transform boolean → log1p
+            if _stored_transform == "none" and bool(_cfg(_mk, "numeric_log_transform", False)):
+                _stored_transform = "log1p"
+            _tidx = safe_option_index(_transform_options, _stored_transform, "none")
+            _sel_transform = st.selectbox(
+                "Power transform",
+                _transform_options,
+                index=_tidx,
+                key=f"preprocess_{_mk}_numeric_power_transform",
+                format_func=lambda x: {"none": "None", "log1p": "Log (log(1+x))", "yeo-johnson": "Yeo-Johnson (auto-optimized)"}[x],
+                help="Power transforms make skewed features more Gaussian, which helps linear models and neural nets.",
+            )
+            st.caption(f"ℹ️ {_transform_help.get(_sel_transform, '')}")
+            # Map back to old log_transform key for pipeline compatibility
+            st.session_state[f"preprocess_{_mk}_numeric_log_transform"] = (_sel_transform == "log1p")
 
-        # Encoding
-        st.subheader("Encoding")
-        st.caption("One-hot creates a binary column per category; high-cardinality variables increase feature count.")
-        st.selectbox("Categorical encoding", ["onehot"], index=0, key=f"preprocess_{_mk}_categorical_encoding")
-
-        # Feature augmentation
-        st.subheader("Feature augmentation")
-        if _eda_high_pn:
-            st.caption("High feature-to-sample ratio; PCA may help.")
-        if _eda_collinearity:
-            st.caption("Collinearity detected; PCA or regularization can help.")
-        _uk = bool(_cfg(_mk, "use_kmeans_features", False))
-        st.checkbox("KMeans features (adds distances, optional one-hot labels)", value=_uk, key=f"preprocess_{_mk}_use_kmeans")
-        st.caption("**What changes:** Adds columns: distances to each cluster centroid and, if enabled, one-hot cluster labels. Original features remain unless PCA is also used.")
-        if _uk:
-            st.number_input("Clusters", 2, 20, int(_cfg(_mk, "kmeans_n_clusters", 5)), key=f"preprocess_{_mk}_kmeans_n_clusters")
-            st.checkbox("Add distances", value=bool(_cfg(_mk, "kmeans_add_distances", True)), key=f"preprocess_{_mk}_kmeans_distances")
-            st.checkbox("Add one-hot labels", value=bool(_cfg(_mk, "kmeans_add_onehot", False)), key=f"preprocess_{_mk}_kmeans_onehot")
-        _up = bool(_cfg(_mk, "use_pca", False))
-        st.checkbox("PCA (output PC1, PC2, …)", value=_up, key=f"preprocess_{_mk}_use_pca")
-        st.caption("**What changes:** Replaces the current numeric (and possibly KMeans) features with principal components (PC1, PC2, …). Original feature names are no longer in the output.")
-        if _up:
-            _maxc = max(1, min(50, len(numeric_features) + (len(categorical_features) * 5) if categorical_features else len(numeric_features)))
-            _pn = _cfg(_mk, "pca_n_components", 10)
-            _fix = isinstance(_pn, (int, type(1)))
-            _pmode = st.radio("PCA mode", ["Fixed Components", "Variance Threshold"], index=0 if _fix else 1, key=f"preprocess_{_mk}_pca_mode")
-            if _pmode == "Fixed Components":
-                _defn = min(int(_pn), _maxc) if isinstance(_pn, (int, float)) else min(10, _maxc)
-                st.number_input("Components", 1, _maxc, _defn, key=f"preprocess_{_mk}_pca_n_components")
+            # ── 3. 🏷️ Encode Categories ──
+            if categorical_features:
+                st.markdown("#### 🏷️ Encode Categories")
+                st.caption("*Why it matters:* Models need numeric inputs. How you encode categories affects feature count, model performance, and interpretability.")
+                _enc_options = ["onehot", "target", "ordinal"]
+                _enc_help = {
+                    "onehot": "Creates a binary column per category. Safe and interpretable. Can cause feature explosion with high-cardinality variables (>10 levels).",
+                    "target": "Encodes each category as the smoothed mean of the target variable. Prevents feature explosion. Risk: subtle data leakage if not done in-fold — our pipeline uses cross-fitting to mitigate this.",
+                    "ordinal": "Maps categories to integers (0, 1, 2, …). Only appropriate when categories have a natural order (e.g., education level, severity grade). Incorrect use implies false ordering.",
+                }
+                _stored_enc = _cfg(_mk, "categorical_encoding", "onehot")
+                _eidx = safe_option_index(_enc_options, _stored_enc, "onehot")
+                _sel_enc = st.selectbox(
+                    "Categorical encoding",
+                    _enc_options,
+                    index=_eidx,
+                    key=f"preprocess_{_mk}_categorical_encoding",
+                    format_func=lambda x: {"onehot": "One-Hot (binary columns)", "target": "Target Encoding (smoothed means)", "ordinal": "Ordinal (integer mapping)"}[x],
+                )
+                st.caption(f"ℹ️ {_enc_help.get(_sel_enc, '')}")
+                if _high_card_feats and _sel_enc == "onehot":
+                    st.warning(f"⚠️ High-cardinality categoricals detected: **{', '.join(_high_card_feats[:3])}** ({df[_high_card_feats[0]].nunique()} levels). One-hot will create many sparse columns. Consider **Target Encoding**.")
+                if _sel_enc == "ordinal":
+                    st.info("💡 Ordinal encoding assumes a meaningful order. If your categories are nominal (no order), use One-Hot or Target Encoding instead.")
             else:
-                _pv = 0.95 if not isinstance(_pn, (int, float)) or _pn > 1 else float(_pn)
-                st.slider("Variance", 0.5, 0.99, _pv, 0.05, key=f"preprocess_{_mk}_pca_n_components")
-            st.checkbox("Whiten", value=bool(_cfg(_mk, "pca_whiten", False)), key=f"preprocess_{_mk}_pca_whiten")
+                st.session_state[f"preprocess_{_mk}_categorical_encoding"] = "onehot"
 
+            # ── 4. ✂️ Handle Outliers ──
+            st.markdown("#### ✂️ Handle Outliers")
+            st.caption("*Why it matters:* Outliers can dominate loss functions (especially MSE) and distort scaling. Tree models are naturally robust; linear/neural models are not.")
+            if _eda_outliers:
+                _out_feats = profile.features_with_outliers if profile else []
+                st.warning(f"⚠️ EDA detected outliers in {len(_out_feats)} feature(s)" + (f": {', '.join(_out_feats[:5])}" if _out_feats else "") + ".")
+            _c_out1, _c_out2 = st.columns(2)
+            with _c_out1:
+                if numeric_features:
+                    _out_options = ["none", "percentile", "mad"]
+                    _out_help = {
+                        "none": "No outlier treatment. Appropriate for tree models or when outliers are real data points.",
+                        "percentile": "Clips values outside specified percentiles (e.g., 1st–99th). Simple and effective.",
+                        "mad": "Median Absolute Deviation. Flags values beyond k × MAD from the median. More robust than z-score.",
+                    }
+                    _v = _cfg(_mk, "numeric_outlier_treatment", "none")
+                    _idx = safe_option_index(_out_options, _v, "none")
+                    _ot = st.selectbox(
+                        "Outlier treatment",
+                        _out_options,
+                        index=_idx,
+                        key=f"preprocess_{_mk}_numeric_outlier_treatment",
+                        format_func=lambda x: {"none": "None", "percentile": "Percentile clipping", "mad": "MAD-based removal"}[x],
+                    )
+                    st.caption(f"ℹ️ {_out_help.get(_ot, '')}")
+                    if _ot == "percentile":
+                        st.number_input("Lower percentile", 0.0, 0.1, 0.01, key=f"preprocess_{_mk}_outlier_lower_q")
+                        st.number_input("Upper percentile", 0.9, 1.0, 0.99, key=f"preprocess_{_mk}_outlier_upper_q")
+                    elif _ot == "mad":
+                        st.number_input("MAD threshold (k)", 2.0, 6.0, 3.5, key=f"preprocess_{_mk}_outlier_mad_threshold", help="Values beyond k × MAD from the median are treated as outliers. 3.5 is a common default.")
+                else:
+                    _ot = "none"
+            with _c_out2:
+                _pg = st.checkbox(
+                    "Domain-specific range filtering",
+                    value=bool(_cfg(_mk, "plausibility_gating", False)),
+                    key=f"preprocess_{_mk}_plausibility_gating",
+                    help="Apply domain-specific plausible ranges (e.g., NHANES reference ranges for biomarkers). Values outside the range are clipped or filtered.",
+                )
+                if _pg:
+                    _pm = safe_option_index(["clip", "filter"], _cfg(_mk, "plausibility_mode", "clip"), "clip")
+                    st.radio(
+                        "Range filter mode",
+                        ["clip", "filter"],
+                        index=_pm,
+                        format_func=lambda x: "Clip to NaN (keep rows)" if x == "clip" else "Remove out-of-range rows",
+                        key=f"preprocess_{_mk}_plausibility_mode",
+                        horizontal=True,
+                    )
+                st.checkbox(
+                    "Unit harmonization",
+                    value=bool(_cfg(_mk, "unit_harmonization", False)),
+                    key=f"preprocess_{_mk}_unit_harmonization",
+                    help="Auto-detect and convert mixed units (e.g., mg/dL ↔ mmol/L) before modeling.",
+                )
+
+            # ── 5. 🔬 Advanced: Dimensionality Reduction & Feature Engineering ──
+            st.markdown("#### 🔬 Advanced")
+            st.caption("⚠️ *These options modify your feature space in ways that affect interpretability. Use only with clear justification — reviewers will ask why.*")
+
+            # PCA — Dimensionality Reduction
+            _up = bool(_cfg(_mk, "use_pca", False))
+            _up = st.checkbox(
+                "PCA — Dimensionality Reduction",
+                value=_up,
+                key=f"preprocess_{_mk}_use_pca",
+                help="Replaces original features with principal components (PC1, PC2, …). Eliminates multicollinearity but DESTROYS feature interpretability.",
+            )
+            if _up:
+                st.warning(
+                    "⚠️ **Interpretability impact:** After PCA, you can no longer say 'BMI was the strongest predictor.' "
+                    "SHAP values will refer to PC1, PC2, etc. Use only when: (1) severe multicollinearity, "
+                    "(2) features >> samples, or (3) black-box model where only prediction accuracy matters."
+                )
+                if _eda_collinearity:
+                    st.info("✅ Collinearity was detected in EDA — PCA may be justified here.")
+                if _eda_high_pn:
+                    st.info("✅ High feature-to-sample ratio detected — PCA can help reduce dimensionality.")
+                _maxc = max(1, min(50, len(numeric_features) + (len(categorical_features) * 5) if categorical_features else len(numeric_features)))
+                _pn = _cfg(_mk, "pca_n_components", 10)
+                _fix = isinstance(_pn, (int, type(1)))
+                _pmode = st.radio("PCA mode", ["Fixed Components", "Variance Threshold"], index=0 if _fix else 1, key=f"preprocess_{_mk}_pca_mode")
+                if _pmode == "Fixed Components":
+                    _defn = min(int(_pn), _maxc) if isinstance(_pn, (int, float)) else min(10, _maxc)
+                    st.number_input("Components", 1, _maxc, _defn, key=f"preprocess_{_mk}_pca_n_components")
+                else:
+                    _pv = 0.95 if not isinstance(_pn, (int, float)) or _pn > 1 else float(_pn)
+                    st.slider("Variance explained", 0.5, 0.99, _pv, 0.05, key=f"preprocess_{_mk}_pca_n_components", help="Retain enough components to explain this fraction of total variance.")
+                st.checkbox("Whiten", value=bool(_cfg(_mk, "pca_whiten", False)), key=f"preprocess_{_mk}_pca_whiten", help="Decorrelates and normalizes components to unit variance. Useful for downstream algorithms that assume isotropic data.")
+
+            # KMeans — Cluster-based Feature Engineering
+            _uk = bool(_cfg(_mk, "use_kmeans_features", False))
+            _uk = st.checkbox(
+                "🧪 Cluster-based features (experimental)",
+                value=_uk,
+                key=f"preprocess_{_mk}_use_kmeans",
+                help="Adds distance-to-centroid columns that capture nonlinear cluster structure in your data.",
+            )
+            if _uk:
+                st.warning(
+                    "⚠️ **Experimental feature.** Adds derived columns (distance to each KMeans centroid). "
+                    "Increases feature count. Makes SHAP/coefficient interpretation harder — "
+                    "'distance to cluster 3' is not meaningful to domain experts. "
+                    "Most useful for neural nets or when you suspect latent subgroups in your data."
+                )
+                st.number_input("Number of clusters", 2, 20, int(_cfg(_mk, "kmeans_n_clusters", 5)), key=f"preprocess_{_mk}_kmeans_n_clusters")
+                st.checkbox("Add distance features", value=bool(_cfg(_mk, "kmeans_add_distances", True)), key=f"preprocess_{_mk}_kmeans_distances")
+                st.checkbox("Add one-hot cluster labels", value=bool(_cfg(_mk, "kmeans_add_onehot", False)), key=f"preprocess_{_mk}_kmeans_onehot")
+
+# Pipeline summary before building
 st.markdown("---")
-if st.button("Build Pipelines", type="primary", key="preprocess_build_button"):
+if use_smart_defaults and selected_models:
+    st.markdown("**📋 Pipeline Summary** — what will be built:")
+    _summary_cols = st.columns(min(len(selected_models), 4))
+    for _si, _sm in enumerate(selected_models):
+        with _summary_cols[_si % len(_summary_cols)]:
+            _spec = registry_prep.get(_sm)
+            _needs_scale = _spec and _spec.capabilities and getattr(_spec.capabilities, "requires_scaled_numeric", False)
+            _effective_scaling = "standard" if _needs_scale else _auto_scaling
+            st.markdown(f"""
+            <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.6rem; margin-bottom: 0.4rem; font-size: 0.85rem;">
+                <strong>{_sm.upper()}</strong><br/>
+                Scale: {_effective_scaling} · Impute: {_auto_imputation}<br/>
+                {"Missing indicators ✓" if _auto_missing_indicators else ""}
+                {"· Scaling auto-upgraded" if _needs_scale and _auto_scaling != "standard" else ""}
+            </div>
+            """, unsafe_allow_html=True)
+
+if st.button("🔨 Build Pipelines", type="primary", key="preprocess_build_button"):
     try:
         t0 = time.perf_counter()
         with st.spinner("Building pipelines..."):
@@ -385,9 +563,10 @@ if st.button("Build Pipelines", type="primary", key="preprocess_build_button"):
                 notes = []
                 if imode != "high":
                     return notes
-                if c.get("numeric_log_transform"):
+                if c.get("numeric_log_transform") or c.get("numeric_power_transform", "none") != "none":
                     c["numeric_log_transform"] = False
-                    notes.append("Disabled log transform to preserve interpretability.")
+                    c["numeric_power_transform"] = "none"
+                    notes.append("Disabled power transform to preserve interpretability.")
                 if c.get("use_pca"):
                     c["use_pca"] = False
                     notes.append("Disabled PCA for interpretability.")
@@ -441,6 +620,7 @@ if st.button("Build Pipelines", type="primary", key="preprocess_build_button"):
                     "numeric_imputation": _get(model_key, "numeric_imputation", "median"),
                     "numeric_scaling": _get(model_key, "numeric_scaling", "standard"),
                     "numeric_log_transform": bool(_get(model_key, "numeric_log_transform", False)),
+                    "numeric_power_transform": _get(model_key, "numeric_power_transform", "none"),
                     "numeric_missing_indicators": bool(_get(model_key, "numeric_missing_indicators", False)),
                     "numeric_outlier_treatment": ot,
                     "numeric_outlier_params": params,
@@ -479,6 +659,7 @@ if st.button("Build Pipelines", type="primary", key="preprocess_build_button"):
                     numeric_imputation=model_config["numeric_imputation"],
                     numeric_scaling=model_config["numeric_scaling"],
                     numeric_log_transform=model_config["numeric_log_transform"],
+                    numeric_power_transform=model_config.get("numeric_power_transform", "none"),
                     numeric_missing_indicators=model_config["numeric_missing_indicators"],
                     numeric_outlier_treatment=model_config["numeric_outlier_treatment"],
                     numeric_outlier_params=model_config["numeric_outlier_params"],
@@ -509,6 +690,7 @@ if st.button("Build Pipelines", type="primary", key="preprocess_build_button"):
                     numeric_imputation=model_config["numeric_imputation"],
                     numeric_scaling=model_config["numeric_scaling"],
                     numeric_log_transform=model_config["numeric_log_transform"],
+                    numeric_power_transform=model_config.get("numeric_power_transform", "none"),
                     numeric_missing_indicators=model_config["numeric_missing_indicators"],
                     numeric_outlier_treatment=model_config["numeric_outlier_treatment"],
                     numeric_outlier_params=model_config["numeric_outlier_params"],
@@ -632,7 +814,9 @@ if pipelines_by_model:
                     mime="text/csv",
                     key=f"download_preview_{model_key}",
                 )
-    st.info("Pipeline ready. Proceed to Train & Compare page.")
+    _built_names = ", ".join(k.upper() for k in pipelines_by_model.keys())
+    st.success(f"✅ **Pipelines ready for: {_built_names}**. Head to **Train & Compare** → your models and preprocessing are already synced.")
+    st.page_link("pages/04_Train_and_Compare.py", label="➡️ Go to Train & Compare", icon="🏋️")
 
     if st.button("Rebuild Pipeline", key="preprocess_rebuild_button"):
         st.session_state.preprocessing_pipeline = None
