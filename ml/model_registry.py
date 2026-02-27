@@ -477,7 +477,8 @@ def get_registry() -> Dict[str, ModelSpec]:
             'batch_size': {'type': 'int', 'min': 32, 'max': 512, 'default': 256, 'help': 'Batch size'},
             'lr': {'type': 'float', 'min': 1e-5, 'max': 1e-2, 'default': 0.0015, 'log': True, 'help': 'Learning rate'},
             'weight_decay': {'type': 'float', 'min': 1e-5, 'max': 1e-2, 'default': 0.0002, 'log': True, 'help': 'L2 regularization (weight decay)'},
-            'patience': {'type': 'int', 'min': 5, 'max': 50, 'default': 30, 'help': 'Early stopping patience'}
+            'patience': {'type': 'int', 'min': 5, 'max': 50, 'default': 30, 'help': 'Early stopping patience'},
+            'loss_function': {'type': 'select', 'options': ['mse', 'huber', 'mae', 'weighted_huber'], 'default': 'mse', 'help': 'Loss function for regression (MSE is standard; weighted_huber emphasizes high-value targets)'}
         },
         capabilities=ModelCapabilities(
             supports_regression=True,

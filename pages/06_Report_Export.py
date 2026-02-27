@@ -209,7 +209,7 @@ def generate_report() -> str:
     git_info = get_git_info()
     
     # Header with metadata
-    report_lines.append("# Modeling Lab Report")
+    report_lines.append("# Tabular ML Lab Report")
     report_lines.append("")
     report_lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     report_lines.append(f"**Git Commit:** {git_info['commit']} ({git_info['branch']})")
@@ -651,7 +651,7 @@ def generate_report() -> str:
     # Notes and Reproducibility
     report_lines.append("## 📝 Notes")
     report_lines.append("")
-    report_lines.append("- This report was generated automatically by the Modeling Lab")
+    report_lines.append("- This report was generated automatically by Tabular ML Lab")
     report_lines.append("- All models were evaluated on the same held-out test set")
     if pipelines_by_model:
         report_lines.append("- Preprocessing was applied per model (see Preprocessing section)")
@@ -674,6 +674,121 @@ report_text = generate_report()
 # Display in a nice container
 with st.container():
     st.markdown(report_text)
+
+# ============================================================================
+# PUBLICATION TOOLS
+# ============================================================================
+st.header("📝 Publication Tools")
+
+# Methods Section Generator
+with st.expander("📄 Auto-Generated Methods Section", expanded=False):
+    st.markdown("""
+    Generate a draft methods section based on your actual workflow choices.
+    Fill in the `[PLACEHOLDER]` sections with study-specific details.
+    """)
+    if st.button("Generate Methods Section", key="gen_methods"):
+        from ml.publication import generate_methods_section
+        train_n = len(st.session_state.get('X_train', []))
+        val_n = len(st.session_state.get('X_val', []))
+        test_n = len(st.session_state.get('X_test', []))
+        prep_config = st.session_state.get('preprocessing_config', {})
+
+        methods_text = generate_methods_section(
+            data_config={},
+            preprocessing_config=prep_config,
+            model_configs={name: {} for name in trained_models.keys()},
+            split_config={},
+            n_total=len(df),
+            n_train=train_n,
+            n_val=val_n,
+            n_test=test_n,
+            feature_names=data_config.feature_cols,
+            target_name=data_config.target_col,
+            task_type=data_config.task_type or "regression",
+            metrics_used=list(next(iter(model_results.values()))['metrics'].keys()) if model_results else ["RMSE"],
+            feature_selection_method=st.session_state.get("feature_selection_results", [None])[0].method if st.session_state.get("feature_selection_results") else None,
+        )
+        st.session_state["methods_section"] = methods_text
+
+    if st.session_state.get("methods_section"):
+        st.markdown(st.session_state["methods_section"])
+        st.download_button(
+            "📥 Download Methods Section",
+            st.session_state["methods_section"],
+            "methods_section.md", "text/markdown",
+            key="dl_methods",
+        )
+
+# CONSORT-Style Flow Diagram
+with st.expander("📊 Sample Flow Diagram", expanded=False):
+    st.markdown("CONSORT-style diagram showing how your sample was derived.")
+    if st.button("Generate Flow Diagram", key="gen_flow"):
+        from ml.publication import generate_flow_diagram_mermaid
+        train_n = len(st.session_state.get('X_train', []))
+        val_n = len(st.session_state.get('X_val', []))
+        test_n = len(st.session_state.get('X_test', []))
+        n_missing_target = df[data_config.target_col].isna().sum() if data_config.target_col else 0
+
+        mermaid = generate_flow_diagram_mermaid(
+            n_total=len(df),
+            n_missing_target=n_missing_target,
+            n_analyzed=len(df) - n_missing_target,
+            n_train=train_n,
+            n_val=val_n,
+            n_test=test_n,
+        )
+        st.session_state["flow_diagram"] = mermaid
+
+    if st.session_state.get("flow_diagram"):
+        st.code(st.session_state["flow_diagram"], language="mermaid")
+        st.caption("Copy this Mermaid code into [mermaid.live](https://mermaid.live) to render or embed in your paper.")
+
+# TRIPOD Checklist
+with st.expander("✅ TRIPOD Checklist", expanded=False):
+    st.markdown("""
+    The [TRIPOD statement](https://www.tripod-statement.org/) is the reporting guideline for
+    prediction model studies. Track your compliance here.
+    """)
+    from ml.publication import TRIPODTracker, TRIPOD_ITEMS
+
+    if "tripod_tracker" not in st.session_state:
+        tracker = TRIPODTracker()
+        # Auto-mark items we can detect
+        if data_config and data_config.target_col:
+            tracker.mark_complete("outcome_defined", f"Target: {data_config.target_col}", "Upload & Audit")
+        if data_config and data_config.feature_cols:
+            tracker.mark_complete("predictors_defined", f"{len(data_config.feature_cols)} features", "Upload & Audit")
+        if trained_models:
+            tracker.mark_complete("model_building", f"Models: {', '.join(trained_models.keys())}", "Train & Compare")
+        if model_results:
+            tracker.mark_complete("performance_measures", "Test set metrics computed", "Train & Compare")
+        if st.session_state.get("bootstrap_results"):
+            tracker.mark_complete("performance_ci", "Bootstrap CIs computed", "Train & Compare")
+        if st.session_state.get("table1_df") is not None:
+            tracker.mark_complete("table1", "Table 1 generated", "EDA")
+        prep_config = st.session_state.get('preprocessing_config', {})
+        if prep_config:
+            tracker.mark_complete("predictor_handling", "Preprocessing configured", "Preprocess")
+            if prep_config.get("numeric_imputation", "none") != "none":
+                tracker.mark_complete("missing_data", f"Imputation: {prep_config.get('numeric_imputation')}", "Preprocess")
+        st.session_state["tripod_tracker"] = tracker
+
+    tracker = st.session_state["tripod_tracker"]
+    done, total = tracker.get_progress()
+    st.progress(done / total)
+    st.markdown(f"**{done}/{total} items addressed**")
+
+    checklist_df = tracker.get_checklist_df()
+    st.dataframe(checklist_df, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "📥 Download TRIPOD Checklist",
+        checklist_df.to_csv(index=False),
+        "tripod_checklist.csv", "text/csv",
+        key="dl_tripod",
+    )
+
+st.markdown("---")
 
 # ============================================================================
 # EXPORT OPTIONS

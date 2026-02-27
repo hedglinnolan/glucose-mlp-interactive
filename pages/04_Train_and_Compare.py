@@ -1056,6 +1056,153 @@ if st.session_state.get('trained_models'):
             comparison_df.style.highlight_max(subset=['Accuracy', 'F1'], axis=0, color='lightgreen'),
             width="stretch"
         )
+
+    # ================================================================
+    # BOOTSTRAP CONFIDENCE INTERVALS
+    # ================================================================
+    with st.expander("📊 Metrics with 95% Bootstrap Confidence Intervals", expanded=True):
+        st.markdown("""
+        **Why this matters:** Point estimates (e.g., "RMSE = 0.82") aren't sufficient for publication.
+        Confidence intervals show the uncertainty in your estimates. Reviewers expect these.
+        """)
+
+        if st.button("Compute Bootstrap CIs (1000 resamples)", key="compute_bootstrap_cis"):
+            from ml.bootstrap import (
+                bootstrap_all_regression_metrics, bootstrap_all_classification_metrics,
+                format_metric_with_ci,
+            )
+            bootstrap_results = {}
+            progress = st.progress(0)
+            model_names_list = list(st.session_state.model_results.keys())
+            for i, name in enumerate(model_names_list):
+                results = st.session_state.model_results[name]
+                y_test_local = np.array(results["y_test"])
+                y_pred_local = np.array(results["y_test_pred"])
+
+                if data_config.task_type == "regression":
+                    cis = bootstrap_all_regression_metrics(y_test_local, y_pred_local, n_resamples=1000)
+                else:
+                    y_proba_local = None
+                    model_obj = st.session_state.trained_models.get(name)
+                    if model_obj and hasattr(model_obj, 'supports_proba') and model_obj.supports_proba():
+                        pipeline_local = st.session_state.get("fitted_preprocessing_pipelines", {}).get(name)
+                        if pipeline_local is not None:
+                            try:
+                                X_test_local = pipeline_local.transform(st.session_state.get("X_test"))
+                                y_proba_local = model_obj.predict_proba(X_test_local)
+                                if y_proba_local is not None and y_proba_local.ndim == 2 and y_proba_local.shape[1] == 2:
+                                    y_proba_local = y_proba_local[:, 1]
+                            except Exception:
+                                pass
+                    cis = bootstrap_all_classification_metrics(y_test_local, y_pred_local, y_proba=y_proba_local, n_resamples=1000)
+
+                bootstrap_results[name] = cis
+                progress.progress((i + 1) / len(model_names_list))
+
+            st.session_state["bootstrap_results"] = bootstrap_results
+
+        if st.session_state.get("bootstrap_results"):
+            from ml.bootstrap import format_metric_with_ci
+            ci_rows = []
+            for name, cis in st.session_state["bootstrap_results"].items():
+                row = {"Model": name.upper()}
+                for metric_name, result in cis.items():
+                    row[metric_name] = format_metric_with_ci(result, decimal_places=4)
+                ci_rows.append(row)
+            ci_df = pd.DataFrame(ci_rows)
+            st.dataframe(ci_df, use_container_width=True, hide_index=True)
+            st.caption("Format: estimate [95% CI lower, upper] via BCa bootstrap (1000 resamples)")
+
+    # ================================================================
+    # BASELINE MODEL COMPARISON
+    # ================================================================
+    with st.expander("📏 Baseline Model Comparison", expanded=False):
+        st.markdown("""
+        **Why this matters:** Reviewers need to see that your model outperforms trivial baselines.
+        Without this comparison, they can't tell if your model actually adds value.
+        """)
+
+        if st.button("Train Baseline Models", key="train_baselines"):
+            from ml.baseline_models import train_baseline_models
+            X_train_base = st.session_state.get("X_train")
+            y_train_base = st.session_state.get("y_train")
+            X_test_base = st.session_state.get("X_test")
+            y_test_base = st.session_state.get("y_test")
+
+            if X_train_base is not None and y_test_base is not None:
+                # Use the first model's preprocessing pipeline for baselines
+                first_model = list(st.session_state.get("fitted_preprocessing_pipelines", {}).keys())
+                if first_model:
+                    pipe = st.session_state["fitted_preprocessing_pipelines"][first_model[0]]
+                    try:
+                        X_train_t = pipe.transform(X_train_base)
+                        X_test_t = pipe.transform(X_test_base)
+                    except Exception:
+                        X_train_t = np.array(X_train_base)
+                        X_test_t = np.array(X_test_base)
+                else:
+                    X_train_t = np.array(X_train_base)
+                    X_test_t = np.array(X_test_base)
+
+                baselines = train_baseline_models(
+                    X_train_t, np.array(y_train_base),
+                    X_test_t, np.array(y_test_base),
+                    task_type=data_config.task_type or "regression",
+                )
+                st.session_state["baseline_results"] = baselines
+
+        if st.session_state.get("baseline_results"):
+            baselines = st.session_state["baseline_results"]
+            for bname, bres in baselines.items():
+                st.markdown(f"**{bname}:** {bres['description']}")
+                cols_b = st.columns(len(bres["metrics"]))
+                for i, (mname, mval) in enumerate(bres["metrics"].items()):
+                    ci = bres.get("bootstrap_cis", {}).get(mname)
+                    with cols_b[i]:
+                        if ci:
+                            st.metric(mname, f"{mval:.4f}", help=f"95% CI: [{ci.ci_lower:.4f}, {ci.ci_upper:.4f}]")
+                        else:
+                            st.metric(mname, f"{mval:.4f}")
+
+    # ================================================================
+    # CALIBRATION ANALYSIS
+    # ================================================================
+    with st.expander("📐 Calibration Analysis", expanded=False):
+        st.markdown("""
+        **Why this matters:** A model that says "70% chance of event" should be right about 70% of the time.
+        Poor calibration means predicted probabilities are unreliable — critical for clinical decisions.
+        """)
+
+        if data_config.task_type == "classification":
+            for name, results in st.session_state.model_results.items():
+                model_obj = st.session_state.trained_models.get(name)
+                if model_obj and hasattr(model_obj, 'supports_proba') and model_obj.supports_proba():
+                    pipeline_local = st.session_state.get("fitted_preprocessing_pipelines", {}).get(name)
+                    if pipeline_local is not None:
+                        try:
+                            from ml.calibration import calibration_classification, plot_calibration_curve
+                            X_test_local = pipeline_local.transform(st.session_state.get("X_test"))
+                            y_proba_local = model_obj.predict_proba(X_test_local)
+                            if y_proba_local is not None and y_proba_local.ndim == 2:
+                                y_proba_pos = y_proba_local[:, 1] if y_proba_local.shape[1] == 2 else y_proba_local[:, -1]
+                                cal = calibration_classification(np.array(results["y_test"]), y_proba_pos, model_name=name.upper())
+                                fig_cal = plot_calibration_curve(cal)
+                                st.plotly_chart(fig_cal, use_container_width=True, key=f"cal_{name}")
+                                st.caption(f"Brier Score: {cal.brier_score:.4f} | ECE: {cal.ece:.4f} | MCE: {cal.mce:.4f}")
+                        except Exception as e:
+                            st.caption(f"Could not compute calibration for {name}: {e}")
+        else:
+            for name, results in st.session_state.model_results.items():
+                from ml.calibration import calibration_regression
+                cal = calibration_regression(
+                    np.array(results["y_test"]), np.array(results["y_test_pred"]),
+                    model_name=name.upper(),
+                )
+                st.markdown(f"**{name.upper()}:** Calibration slope = {cal.calibration_slope:.3f}, "
+                           f"Intercept = {cal.calibration_intercept:.3f} "
+                           f"(perfect: slope=1, intercept=0)")
+            st.caption("Calibration slope measures systematic over/under-prediction. "
+                      "Slope < 1 = predictions too extreme; slope > 1 = predictions too conservative.")
     
     # CV results if available
     if use_cv:

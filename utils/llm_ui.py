@@ -1,31 +1,78 @@
 """
-Reusable UI for "Interpret these results using an LLM" (Ollama).
-Renders button + optional AI result; auto-starts Ollama if not running.
+Reusable UI for LLM-powered interpretation of analysis results.
+
+Supports: Ollama (default), OpenAI API, Anthropic API.
+Sends rich context with a system prompt that demands actionable, specific interpretation.
 """
 from __future__ import annotations
 
 from typing import Optional, Dict, Any, List
+import logging
+
+logger = logging.getLogger(__name__)
 
 _MAX_TABLE_ROWS = 20
 _MAX_TABLE_CHARS = 2000
 
+# ============================================================================
+# Domain detection
+# ============================================================================
+
+_DOMAIN_KEYWORDS = {
+    "clinical": {"glucose", "bmi", "age", "weight", "height", "bp", "hdl", "ldl",
+                  "hb", "waist", "hip", "cholesterol", "hba1c", "insulin",
+                  "creatinine", "hemoglobin", "albumin", "triglycerides",
+                  "systolic", "diastolic", "egfr", "sbp", "dbp"},
+    "nutrition": {"calories", "carbs", "protein", "fat", "fiber", "sodium",
+                  "potassium", "calcium", "iron", "vitamin", "nutrient",
+                  "dietary", "intake", "servings", "kcal", "macronutrient"},
+    "epidemiology": {"incidence", "prevalence", "odds_ratio", "hazard",
+                     "exposure", "cohort", "case_control", "risk_factor",
+                     "mortality", "morbidity", "survival"},
+}
+
 
 def _infer_domain_hint(feature_names: Optional[List[str]] = None) -> str:
-    """Infer a simple domain hint (e.g. 'clinical') from feature/column names."""
+    """Infer domain from feature/column names."""
     if not feature_names:
         return ""
-    clinical_like = {"glucose", "bmi", "age", "weight", "height", "bp", "hdl", "ldl", "hb", "waist", "hip"}
     names_lower = " ".join(str(x).lower() for x in feature_names)
-    if any(k in names_lower for k in clinical_like):
-        return "clinical"
-    return ""
+    scores = {}
+    for domain, keywords in _DOMAIN_KEYWORDS.items():
+        scores[domain] = sum(1 for k in keywords if k in names_lower)
+    best = max(scores, key=scores.get)
+    return best if scores[best] >= 2 else ""
 
+
+# ============================================================================
+# System prompt for interpretation
+# ============================================================================
+
+INTERPRETATION_SYSTEM_PROMPT = """You are a senior biostatistician and data scientist reviewing analysis results for a research publication. Your role is to provide interpretation that a scientist can use directly.
+
+RULES:
+1. EXPLAIN what the results MEAN for this specific dataset — don't just restate numbers
+2. Give ACTIONABLE recommendations (what should the researcher do next?)
+3. Flag concerns a PEER REVIEWER would raise
+4. Be SPECIFIC — reference the actual values, features, and context provided
+5. If you see red flags (e.g., data leakage, overfitting, insufficient sample size), say so clearly
+6. Suggest what to CHECK or INVESTIGATE further
+7. Use clear, professional language suitable for a methods/results section discussion
+8. Keep it concise — 3-5 key points, not a wall of text
+
+DO NOT:
+- Simply paraphrase or restate the statistical output
+- Give generic textbook explanations
+- Be vague ("the results look good") — be precise about WHY
+- Ignore potential problems to be polite"""
+
+
+# ============================================================================
+# Rich context builder
+# ============================================================================
 
 def build_eda_full_results_context(result: Dict[str, Any], action_id: str) -> str:
-    """
-    Build a full EDA-results context string for the LLM: all findings, stats, and
-    per-figure/table descriptions or data. Use when an action returns multiple plots/tables.
-    """
+    """Build full EDA-results context: all findings, stats, per-figure/table data."""
     import pandas as pd
 
     parts: List[str] = []
@@ -57,7 +104,8 @@ def build_eda_full_results_context(result: Dict[str, Any], action_id: str) -> st
                         bits.append(f"{c}={v:.1f}")
                 if bits:
                     lines.append("  VIF: " + "; ".join(bits))
-        for k in ("shapiro_p", "shapiro_stat", "max_leverage", "max_cooks", "n_high_leverage", "n_high_cooks"):
+        for k in ("shapiro_p", "shapiro_stat", "max_leverage", "max_cooks",
+                   "n_high_leverage", "n_high_cooks"):
             if k in stats and stats[k] is not None:
                 v = stats[k]
                 if isinstance(v, (int, float)):
@@ -119,31 +167,241 @@ def build_llm_context(
     sample_size: Optional[int] = None,
     task_type: Optional[str] = None,
     data_domain_hint: Optional[str] = None,
+    dataset_profile: Optional[Dict[str, Any]] = None,
+    eda_insights: Optional[List[str]] = None,
+    preprocessing_config: Optional[Dict[str, Any]] = None,
+    model_family: Optional[str] = None,
 ) -> str:
-    """Build a rich context string for the LLM (plot type, stats, model, metrics, n, domain, etc.)."""
-    parts = [f"Plot/analysis: {plot_type}.", f"Key stats: {stats_summary}."]
-    if model_name:
-        parts.append(f"Model: {model_name}.")
-    if where:
-        parts.append(f"Where: {where}.")
+    """Build rich context for the LLM with all available information.
+
+    Now includes dataset profile, accumulated EDA insights, preprocessing choices,
+    and model family context for much more specific interpretation.
+    """
+    parts = []
+
+    # Header
+    parts.append(f"## Analysis: {plot_type}")
+    parts.append(f"Statistical results: {stats_summary}")
+
+    # Dataset context
+    context_parts = []
     if task_type:
-        parts.append(f"Task: {task_type}.")
+        context_parts.append(f"Task: {task_type}")
     if sample_size is not None:
-        parts.append(f"Sample size: n={sample_size}.")
-    if metrics:
-        kv = "; ".join(f"{k}={v}" for k, v in list(metrics.items())[:6])
-        parts.append(f"Metrics: {kv}.")
-    if feature_names:
-        feats = ", ".join(str(x) for x in feature_names[:8])
-        if len(feature_names) > 8:
-            feats += ", …"
-        parts.append(f"Features: {feats}.")
+        context_parts.append(f"Sample size: n={sample_size:,}")
     domain = data_domain_hint or (_infer_domain_hint(feature_names) if feature_names else "")
     if domain:
-        parts.append(f"Domain: {domain}.")
+        context_parts.append(f"Domain: {domain}")
+    if context_parts:
+        parts.append("Context: " + " | ".join(context_parts))
+
+    # Dataset profile (if available)
+    if dataset_profile:
+        profile_parts = []
+        for key in ("n_rows", "n_features", "n_numeric", "n_categorical",
+                     "data_sufficiency", "p_n_ratio", "n_features_with_missing"):
+            val = dataset_profile.get(key)
+            if val is not None:
+                profile_parts.append(f"{key}={val}")
+        if profile_parts:
+            parts.append("Dataset profile: " + ", ".join(profile_parts))
+
+    # Model info
+    if model_name:
+        parts.append(f"Model: {model_name}" + (f" ({model_family})" if model_family else ""))
+    if metrics:
+        kv = "; ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
+                       for k, v in list(metrics.items())[:8])
+        parts.append(f"Performance metrics: {kv}")
+
+    # Features
+    if feature_names:
+        if len(feature_names) <= 12:
+            parts.append(f"Features ({len(feature_names)}): {', '.join(str(x) for x in feature_names)}")
+        else:
+            feats = ", ".join(str(x) for x in feature_names[:10])
+            parts.append(f"Features ({len(feature_names)}): {feats}, … (+{len(feature_names)-10} more)")
+
+    # Preprocessing
+    if preprocessing_config:
+        prep_parts = []
+        for key in ("numeric_scaling", "numeric_imputation", "numeric_outlier_treatment",
+                     "categorical_encoding", "use_pca", "use_kmeans_features"):
+            val = preprocessing_config.get(key)
+            if val is not None and val != "none" and val is not False:
+                prep_parts.append(f"{key}={val}")
+        if prep_parts:
+            parts.append("Preprocessing: " + ", ".join(prep_parts))
+
+    # Accumulated EDA insights
+    if eda_insights:
+        parts.append("Prior EDA findings:\n" + "\n".join(f"  - {i}" for i in eda_insights[:8]))
+
+    # Existing interpretation (as background only)
     if existing:
-        parts.append(f"Existing summary (use only as background; do not simply paraphrase): {existing}.")
-    return " ".join(parts)
+        parts.append(f"Existing automated summary (use as background, do NOT paraphrase): {existing}")
+
+    return "\n".join(parts)
+
+
+# ============================================================================
+# LLM Backend abstraction
+# ============================================================================
+
+def _get_llm_backend(session_state: Optional[Dict] = None) -> str:
+    """Get configured LLM backend from session state or default."""
+    if session_state:
+        return session_state.get("llm_backend", "ollama")
+    return "ollama"
+
+
+def _call_llm(
+    context: str,
+    system_prompt: str = INTERPRETATION_SYSTEM_PROMPT,
+    backend: str = "ollama",
+    model: str = "",
+    api_key: str = "",
+    ollama_url: str = "http://localhost:11434",
+) -> Optional[str]:
+    """Call LLM backend with context and system prompt.
+
+    Supports: ollama, openai, anthropic.
+    Returns the response text or None on error.
+    """
+    if backend == "ollama":
+        return _call_ollama(context, system_prompt, model or "llama3.2", ollama_url)
+    elif backend == "openai":
+        return _call_openai(context, system_prompt, model or "gpt-4o-mini", api_key)
+    elif backend == "anthropic":
+        return _call_anthropic(context, system_prompt, model or "claude-sonnet-4-20250514", api_key)
+    else:
+        logger.warning(f"Unknown LLM backend: {backend}")
+        return None
+
+
+def _call_ollama(context: str, system_prompt: str, model: str, url: str) -> Optional[str]:
+    """Call Ollama API."""
+    import requests
+    try:
+        # Ensure running
+        try:
+            requests.get(f"{url}/api/tags", timeout=2)
+        except Exception:
+            import subprocess
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import time
+            time.sleep(3)
+
+        resp = requests.post(
+            f"{url}/api/generate",
+            json={
+                "model": model,
+                "prompt": context,
+                "system": system_prompt,
+                "stream": False,
+                "options": {"temperature": 0.3, "num_predict": 800},
+            },
+            timeout=60,
+        )
+        if resp.ok:
+            return resp.json().get("response", "").strip()
+        else:
+            logger.warning(f"Ollama error: {resp.status_code}")
+            return None
+    except Exception as e:
+        logger.warning(f"Ollama call failed: {e}")
+        return None
+
+
+def _call_openai(context: str, system_prompt: str, model: str, api_key: str) -> Optional[str]:
+    """Call OpenAI API."""
+    try:
+        import openai
+        client = openai.OpenAI(api_key=api_key)
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context},
+            ],
+            temperature=0.3,
+            max_tokens=800,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.warning(f"OpenAI call failed: {e}")
+        return None
+
+
+def _call_anthropic(context: str, system_prompt: str, model: str, api_key: str) -> Optional[str]:
+    """Call Anthropic API."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=model,
+            system=system_prompt,
+            messages=[{"role": "user", "content": context}],
+            max_tokens=800,
+            temperature=0.3,
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        logger.warning(f"Anthropic call failed: {e}")
+        return None
+
+
+# ============================================================================
+# Streamlit UI components
+# ============================================================================
+
+def render_llm_settings_sidebar():
+    """Render LLM configuration in sidebar."""
+    import streamlit as st
+
+    with st.sidebar.expander("🤖 LLM Settings", expanded=False):
+        backend = st.selectbox(
+            "LLM Backend",
+            ["ollama", "openai", "anthropic"],
+            index=["ollama", "openai", "anthropic"].index(
+                st.session_state.get("llm_backend", "ollama")
+            ),
+            key="llm_backend",
+            help="Choose which LLM to use for interpretation. Ollama runs locally (free), OpenAI and Anthropic require API keys.",
+        )
+
+        if backend == "ollama":
+            st.text_input(
+                "Ollama model",
+                value=st.session_state.get("ollama_model", "llama3.2"),
+                key="ollama_model",
+                help="Model name (e.g., llama3.2, mistral, gemma2)",
+            )
+            st.caption("Run `ollama serve` locally and `ollama pull <model>` to set up.")
+        elif backend == "openai":
+            st.text_input(
+                "OpenAI API Key",
+                value=st.session_state.get("openai_api_key", ""),
+                key="openai_api_key",
+                type="password",
+            )
+            st.text_input(
+                "Model",
+                value=st.session_state.get("openai_model", "gpt-4o-mini"),
+                key="openai_model",
+            )
+        elif backend == "anthropic":
+            st.text_input(
+                "Anthropic API Key",
+                value=st.session_state.get("anthropic_api_key", ""),
+                key="anthropic_api_key",
+                type="password",
+            )
+            st.text_input(
+                "Model",
+                value=st.session_state.get("anthropic_model", "claude-sonnet-4-20250514"),
+                key="anthropic_model",
+            )
 
 
 def render_interpretation_with_llm_button(
@@ -151,56 +409,93 @@ def render_interpretation_with_llm_button(
     key: str,
     result_session_key: Optional[str] = None,
 ) -> None:
-    """
-    Render "Interpret these results using an LLM" button and optional AI output.
-    context: rich string (plot type, model, stats, where it appears) for the LLM to interpret.
-    Uses ensure_ollama_running + enhance_with_ollama. Model from session_state or default.
-    Includes optional "Add your own context" text area; when non-empty, appended to context.
+    """Render LLM interpretation button with rich context.
+
+    Now uses the configured backend and enriched system prompt.
     """
     import streamlit as st
-    from ml.llm_local import (
-        ensure_ollama_running,
-        enhance_with_ollama,
-        DEFAULT_OLLAMA_URL,
-        DEFAULT_OLLAMA_MODEL,
-    )
 
     sk = result_session_key or f"llm_result_{key}"
     user_ctx_key = f"{key}_user_context"
-    model = st.session_state.get("ollama_model", DEFAULT_OLLAMA_MODEL)
 
-    with st.expander("Add your own context (optional)", expanded=False):
-        st.caption("Optional extra context for the LLM (e.g. focus on clinical implications).")
+    # Get backend config
+    backend = st.session_state.get("llm_backend", "ollama")
+
+    with st.expander("💬 Add context for the AI (optional)", expanded=False):
+        st.caption(
+            "Tell the AI what to focus on — e.g., clinical implications, "
+            "concerns about sample size, specific features of interest."
+        )
         st.text_area(
-            "User context",
+            "Your context",
             key=user_ctx_key,
-            placeholder="E.g. focus on clinical implications, or what you care about most.",
+            placeholder="E.g., 'Focus on whether these results are strong enough for a JAMA submission' or 'I'm worried about the outliers in BMI'",
             label_visibility="collapsed",
         )
 
-    if st.button("Interpret these results using an LLM", key=key):
-        ok = ensure_ollama_running(DEFAULT_OLLAMA_URL)
-        if not ok:
-            st.session_state[sk] = "__unavailable__"
+    if st.button("🔬 Interpret with AI", key=key, help="Get expert-level interpretation of these results"):
+        ctx = context or ""
+        user_txt = (st.session_state.get(user_ctx_key) or "").strip()
+        if user_txt:
+            ctx += f"\n\nResearcher's specific question/focus: {user_txt}"
+
+        # Gather additional context from session state
+        eda_insights = []
+        insights_list = st.session_state.get("insights", [])
+        if isinstance(insights_list, list):
+            for ins in insights_list[:10]:
+                if isinstance(ins, dict) and "finding" in ins:
+                    eda_insights.append(ins["finding"])
+        if eda_insights:
+            ctx += "\n\nPrior findings from this analysis session:\n" + "\n".join(f"- {i}" for i in eda_insights)
+
+        # Call LLM
+        model = ""
+        api_key = ""
+        ollama_url = "http://localhost:11434"
+
+        if backend == "ollama":
+            model = st.session_state.get("ollama_model", "llama3.2")
+        elif backend == "openai":
+            model = st.session_state.get("openai_model", "gpt-4o-mini")
+            api_key = st.session_state.get("openai_api_key", "")
+            if not api_key:
+                st.session_state[sk] = "__no_key__"
+                st.rerun()
+                return
+        elif backend == "anthropic":
+            model = st.session_state.get("anthropic_model", "claude-sonnet-4-20250514")
+            api_key = st.session_state.get("anthropic_api_key", "")
+            if not api_key:
+                st.session_state[sk] = "__no_key__"
+                st.rerun()
+                return
+
+        with st.spinner(f"Getting interpretation from {backend} ({model})..."):
+            result = _call_llm(
+                ctx, INTERPRETATION_SYSTEM_PROMPT,
+                backend=backend, model=model, api_key=api_key, ollama_url=ollama_url,
+            )
+
+        if result:
+            st.session_state[sk] = result
         else:
-            ctx = context or ""
-            user_txt = (st.session_state.get(user_ctx_key) or "").strip()
-            if user_txt:
-                ctx = f"{ctx} User-provided context (consider this when interpreting): {user_txt}"
-            out = enhance_with_ollama(DEFAULT_OLLAMA_URL, ctx, model=model)
-            st.session_state[sk] = out or "__error__"
+            st.session_state[sk] = "__error__"
         st.rerun()
 
+    # Display result
     res = st.session_state.get(sk)
-    if res == "__unavailable__":
+    if res == "__no_key__":
+        st.warning(f"Please configure your {backend.title()} API key in the sidebar (🤖 LLM Settings).")
+    elif res == "__unavailable__":
         st.caption(
             "To use this feature: (1) Install Ollama from [ollama.ai](https://ollama.ai). "
-            "(2) Run `ollama serve` in a terminal (or ensure it is already running). "
-            f"(3) If needed, pull a model (e.g. `ollama run {DEFAULT_OLLAMA_MODEL}`)."
+            "(2) Run `ollama serve` in a terminal. "
+            "(3) Pull a model: `ollama pull llama3.2`."
         )
     elif res == "__error__":
         st.caption(
-            f"Could not get interpretation from Ollama. Check that a model is available (e.g. `ollama run {DEFAULT_OLLAMA_MODEL}`)."
+            f"Could not get interpretation. Check your LLM configuration in the sidebar."
         )
     elif res:
-        st.markdown(f"**Interpretation (LLM):** {res}")
+        st.markdown(f"**🔬 AI Interpretation:**\n\n{res}")

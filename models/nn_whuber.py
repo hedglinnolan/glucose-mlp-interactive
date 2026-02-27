@@ -222,8 +222,17 @@ def SklearnCompatibleNN(wrapper_instance=None, task_type='regression'):
 class NNWeightedHuberWrapper(BaseModelWrapper):
     """Wrapper for Neural Network with weighted Huber loss (regression) or BCE/CE loss (classification)."""
     
+    # Available loss functions for regression
+    REGRESSION_LOSSES = {
+        'mse': 'Mean Squared Error (standard)',
+        'huber': 'Huber Loss (robust to outliers)',
+        'weighted_huber': 'Weighted Huber (emphasizes high-value targets, e.g., glucose)',
+        'mae': 'Mean Absolute Error (robust)',
+    }
+
     def __init__(self, hidden_layers: List[int] = None, dropout: float = 0.1, 
-                 task_type: str = 'regression', activation: str = 'relu'):
+                 task_type: str = 'regression', activation: str = 'relu',
+                 loss_function: str = 'mse'):
         """
         Initialize NN wrapper.
         
@@ -232,12 +241,15 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
             dropout: Dropout rate
             task_type: 'regression' or 'classification'
             activation: Activation function ('relu', 'tanh', 'leaky_relu', 'elu')
+            loss_function: For regression: 'mse' (default), 'huber', 'weighted_huber', 'mae'
+                          For classification: automatically set to BCE/CE
         """
         super().__init__("Neural Network")
         self.hidden_layers = hidden_layers or [32, 32]
         self.dropout = dropout
         self.task_type = task_type
         self.activation = activation
+        self.loss_function = loss_function
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.history = None
         self._sklearn_estimator = None  # Lazy initialization
@@ -335,7 +347,17 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
                 X_val_t = None
                 y_val_t = None
             
-            criterion = None  # Use weighted_huber_loss for regression
+            # Select regression loss function
+            if self.loss_function == 'mse':
+                criterion = nn.MSELoss()
+            elif self.loss_function == 'huber':
+                criterion = nn.HuberLoss(delta=1.0)
+            elif self.loss_function == 'mae':
+                criterion = nn.L1Loss()
+            elif self.loss_function == 'weighted_huber':
+                criterion = None  # Use weighted_huber_loss function
+            else:
+                criterion = nn.MSELoss()  # Default to MSE
         
         # Create model
         self.model = SimpleMLP(
@@ -392,7 +414,10 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
                         loss = criterion(y_pred, y_batch)
                 else:
                     # Regression
-                    loss = weighted_huber_loss(y_pred, y_batch)
+                    if criterion is not None:
+                        loss = criterion(y_pred, y_batch)
+                    else:
+                        loss = weighted_huber_loss(y_pred, y_batch)
                 
                 loss.backward()
                 optimizer.step()
@@ -418,7 +443,10 @@ class NNWeightedHuberWrapper(BaseModelWrapper):
                         val_accuracy = (val_pred_labels == y_val_t).float().mean().item()
                         val_metric = val_accuracy
                     else:
-                        val_loss = weighted_huber_loss(y_val_pred, y_val_t)
+                        if criterion is not None:
+                            val_loss = criterion(y_val_pred, y_val_t)
+                        else:
+                            val_loss = weighted_huber_loss(y_val_pred, y_val_t)
                         val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val_t) ** 2)).item()
                         val_metric = val_rmse
                 

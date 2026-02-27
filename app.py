@@ -1,27 +1,32 @@
 """
-Main entry point for Modeling Lab multi-page Streamlit app.
-Streamlit automatically detects pages in the pages/ directory.
+Tabular ML Lab — Publication-grade machine learning for tabular research data.
+
+A guided, interactive platform for researchers working with tabular data
+who need defensible methodology and publication-ready outputs.
 """
 import streamlit as st
 
 from utils.session_state import get_data, init_session_state
+from utils.llm_ui import render_llm_settings_sidebar
 
-# Initialize session state (for tour and checklist)
+# Initialize session state
 init_session_state()
 
 # Page config
 st.set_page_config(
-    page_title="Home",
-    page_icon=None,
+    page_title="Tabular ML Lab",
+    page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Learning Checklist Sidebar (plain text; storyline progress indicator on pages keeps emojis)
+# Sidebar: LLM settings
+render_llm_settings_sidebar()
+
+# Sidebar: Learning Checklist
 with st.sidebar:
-    st.header("Learning Checklist")
-    
-    # Check completion status
+    st.header("Workflow Progress")
+
     data_uploaded = get_data() is not None
     data_configured = st.session_state.get('data_config') is not None and st.session_state.get('data_config').target_col is not None
     audit_complete = st.session_state.get('data_audit') is not None
@@ -29,146 +34,166 @@ with st.sidebar:
     models_trained = len(st.session_state.get('trained_models', {})) > 0
     explainability_run = st.session_state.get('permutation_importance') is not None
     report_generated = st.session_state.get('report_data') is not None
-    
+
     checklist_items = [
-        ("Upload Data", data_uploaded),
-        ("Review Audit", audit_complete),
-        ("Explore EDA", data_configured),
-        ("Build Pipeline", pipeline_built),
-        ("Train Models", models_trained),
-        ("Run Explainability", explainability_run),
-        ("Export Report", report_generated)
+        ("Upload & Configure Data", data_uploaded),
+        ("Review Data Quality", audit_complete),
+        ("Explore (EDA)", data_configured),
+        ("Select Features", False),  # new feature selection page
+        ("Build Preprocessing", pipeline_built),
+        ("Train & Compare Models", models_trained),
+        ("Explain & Validate", explainability_run),
+        ("Export Report", report_generated),
     ]
-    
+
     for item, completed in checklist_items:
-        status = "[x]" if completed else "[ ]"
+        status = "✅" if completed else "⬜"
         st.markdown(f"{status} {item}")
-    
+
     st.divider()
-    
-    # Progress indicator
     completed_count = sum(1 for _, completed in checklist_items if completed)
-    progress_pct = (completed_count / len(checklist_items)) * 100
-    st.progress(progress_pct / 100)
-    st.caption(f"Progress: {completed_count}/{len(checklist_items)} steps complete")
+    progress_pct = completed_count / len(checklist_items)
+    st.progress(progress_pct)
+    st.caption(f"{completed_count}/{len(checklist_items)} steps complete")
 
-# Guided Tour (first-time users)
-if not st.session_state.get('has_completed_tour', False):
-    with st.container():
-        st.info("**New here?** Take the Guided Tour to learn the workflow. Complete steps 1-7 in order for the best experience.")
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            if st.button("Start Guided Tour", key="start_tour"):
-                st.session_state.show_guided_tour = True
-                st.rerun()
-            if st.button("Dismiss", key="dismiss_tour"):
-                st.session_state.has_completed_tour = True
-                st.rerun()
-        st.divider()
+# ============================================================================
+# Main page
+# ============================================================================
 
-# Main page (home)
-st.title("Home")
-st.markdown("""
-Welcome to the **Modeling Lab** - An educational platform for machine learning experimentation.
+st.title("🔬 Tabular ML Lab")
+st.markdown("**Publication-grade machine learning for tabular research data**")
 
-### Workflow
+st.markdown("---")
 
-Navigate through the pages using the sidebar:
+# Getting started - clean and not overwhelming
+col1, col2 = st.columns([2, 1])
 
-1. **Upload & Audit** - Create projects, upload related files, merge datasets, and configure your analysis
-2. **EDA** - Explore your data with visualizations and statistics
-3. **Preprocess** - Build preprocessing pipelines for your features (Prediction mode only)
-4. **Train & Compare** - Train multiple models and compare performance (Prediction mode only)
-5. **Explainability** - Understand model predictions with feature importance (Prediction mode only)
-6. **Report Export** - Generate comprehensive modeling reports (Prediction mode only)
-7. **Hypothesis Testing** - Run statistical tests to test hypotheses (Hypothesis Testing mode only)
-
-### Features
-
-- **Project-Based Organization**: Group related datasets into projects for organized analysis
-- **Intelligent Data Merging**: Upload multiple related files and merge them with an interactive merge builder
-- **Automatic Join Key Detection**: The system suggests potential join keys based on column analysis
-- **Task Modes**: Choose between Prediction (ML models) or Hypothesis Testing (statistical tests)
-- **Data Reshaping**: Transpose data during upload if features are in rows instead of columns
-- **Multiple Formats**: Support for CSV, Excel, Parquet, and TSV files
-- **Consistent Preprocessing**: All models use the same preprocessing pipeline
-- **Honest Evaluation**: Proper train/val/test splits with optional cross-validation
-- **Multiple Models**: Neural Networks, Random Forest, GLM (OLS & Huber)
-- **Interpretability**: Permutation importance, partial dependence plots, optional SHAP
-- **Statistical Testing**: Correlation, t-tests, ANOVA, chi-square, normality tests, and more
-
-### Getting Started
-
-**Step 1: Set Up Your Project**
-1. Go to **Upload & Audit** page
-2. Create a new project to organize your related datasets
-3. Upload all data files that belong together (e.g., patient demographics + lab results)
-
-**Step 2: Merge Your Data (if needed)**
-4. If you have multiple files, use the Merge Builder to combine them
-5. The system will detect common columns and suggest join keys
-6. Define your merge steps and create a working table
-
-**Step 3: Configure Your Analysis**
-7. Select your task mode (Prediction or Hypothesis Testing)
-8. For Prediction: Select target and feature variables
-9. For Hypothesis Testing: Navigate to the Hypothesis Testing page
-
-**Step 4: Complete Your Analysis**
-- **Prediction**: EDA → Preprocess → Train & Compare → Explainability → Report Export
-- **Hypothesis Testing**: Navigate to Hypothesis Testing page to run statistical tests
-
----
-
-**Note:** This app uses Streamlit's multi-page feature. Pages are automatically detected from the `pages/` directory.
-""")
-
-# Sidebar navigation info
-st.sidebar.title("Modeling Lab")
-
-# Guided Tour expander (always available)
-with st.sidebar.expander("Guided Tour", expanded=st.session_state.get('show_guided_tour', False)):
+with col1:
     st.markdown("""
-    **Complete these steps in order:**
-    
-    1. **Upload & Audit** - Create project, upload files, merge if needed, select target & features
-    2. **EDA** - Explore distributions, correlations, target vs features
-    3. **Preprocess** - Build pipeline (imputation, scaling, encoding)
-    4. **Train & Compare** - Prepare splits, train models, compare metrics
-    5. **Explainability** - Permutation importance, partial dependence
-    6. **Report Export** - Download comprehensive report
-    
-    **Hypothesis Testing** - Alternative path for statistical tests (no ML).
+    ### Welcome
+
+    Tabular ML Lab guides you through the complete modeling workflow — from raw data
+    to publication-ready results. Built for researchers who need:
+
+    - **Defensible methodology** — proper validation, bootstrap confidence intervals, baseline comparisons
+    - **Publication-ready outputs** — Table 1, methods sections, TRIPOD checklists, journal-quality figures
+    - **Intelligent guidance** — the app coaches you through decisions and flags reviewer concerns
+
+    ### How It Works
+
+    Follow the pages in order using the sidebar. Each step builds on the previous one:
     """)
-    if st.button("I've completed the tour", key="tour_done"):
+
+    # Visual workflow
+    steps = [
+        ("1️⃣", "**Upload & Audit**", "Load your data, merge files, configure target & features"),
+        ("2️⃣", "**Explore (EDA)**", "Distributions, correlations, Table 1, data quality assessment"),
+        ("3️⃣", "**Feature Selection**", "LASSO, RFE-CV, stability selection with FDR correction"),
+        ("4️⃣", "**Preprocess**", "Imputation, scaling, encoding — per-model pipelines"),
+        ("5️⃣", "**Train & Compare**", "Multiple models with bootstrap CIs & baseline comparison"),
+        ("6️⃣", "**Explain & Validate**", "SHAP, calibration, external validation, subgroup analysis"),
+        ("7️⃣", "**Export Report**", "Methods section, TRIPOD checklist, figures & tables"),
+    ]
+
+    for emoji, title, desc in steps:
+        st.markdown(f"{emoji} {title} — {desc}")
+
+with col2:
+    st.markdown("### Quick Start")
+    st.info("""
+    **First time?**
+
+    1. Click **Upload & Audit** in the sidebar
+    2. Upload a CSV or Excel file
+    3. Select your target variable
+    4. Follow the guided workflow
+
+    The app will coach you through each step.
+    """)
+
+    st.markdown("### Task Modes")
+    st.markdown("""
+    - **Prediction** — Build and validate ML models
+    - **Hypothesis Testing** — Run statistical tests (t-tests, ANOVA, etc.)
+    """)
+
+st.markdown("---")
+
+# What's new / capabilities
+with st.expander("📋 Capabilities", expanded=False):
+    st.markdown("""
+    **Data Handling:**
+    - CSV, Excel, Parquet, TSV upload
+    - Multi-file projects with intelligent merge builder
+    - Missing data characterization (MCAR/MAR analysis)
+    - Automatic data type detection
+
+    **Models:**
+    - Linear (Ridge, Lasso, ElasticNet)
+    - Trees (Random Forest, ExtraTrees, HistGradientBoosting)
+    - Distance (KNN) · Margin (SVM) · Probabilistic (Naive Bayes, LDA)
+    - Neural Networks (PyTorch, configurable architecture)
+    - Automatic baseline comparison (null model + simple regression)
+
+    **Evaluation:**
+    - Bootstrap 95% CIs on all metrics
+    - Calibration analysis (reliability diagrams, Brier score, ECE)
+    - Decision curve analysis (clinical utility)
+    - Subgroup analysis with forest plots
+    - Cross-validation with paired statistical comparisons
+
+    **Publication Tools:**
+    - Table 1 generator (stratified, with p-values and SMD)
+    - Auto-generated methods section
+    - TRIPOD checklist tracker
+    - CONSORT-style flow diagrams
+    - Journal-quality figure export (Nature/JAMA themes)
+    - LaTeX/Word table export
+
+    **Feature Selection:**
+    - LASSO path visualization
+    - Recursive Feature Elimination with CV
+    - Univariate screening with FDR correction
+    - Stability selection
+    - Consensus features across methods
+
+    **Explainability:**
+    - SHAP values (linear, tree, kernel)
+    - Permutation importance
+    - Partial dependence plots
+    - AI-powered interpretation (Ollama/OpenAI/Anthropic)
+    """)
+
+# Sidebar extras
+st.sidebar.title("🔬 Tabular ML Lab")
+
+with st.sidebar.expander("📖 Guided Tour", expanded=st.session_state.get('show_guided_tour', False)):
+    st.markdown("""
+    **Follow these steps in order:**
+
+    1. **Upload & Audit** — Create project, upload files, select target & features
+    2. **EDA** — Explore data, generate Table 1, assess quality
+    3. **Feature Selection** — Identify the most important predictors
+    4. **Preprocess** — Build preprocessing pipelines
+    5. **Train & Compare** — Train models, compare with baselines
+    6. **Explainability** — Understand model behavior, validate
+    7. **Report Export** — Generate publication-ready outputs
+
+    *Or use **Hypothesis Testing** for statistical tests (no ML).*
+    """)
+    if st.button("I've read this", key="tour_done"):
         st.session_state.has_completed_tour = True
         st.session_state.show_guided_tour = False
         st.rerun()
 
-st.sidebar.markdown("""
-### Navigation
-
-Use the sidebar to navigate between pages, or use the page selector at the top.
-
-### Quick Links
-
-- **Upload & Audit**: Create projects, upload files, merge datasets, and configure analysis
-- **EDA**: Explore your dataset visually
-- **Preprocess**: Build preprocessing pipelines (Prediction only)
-- **Train & Compare**: Train and evaluate models (Prediction only)
-- **Explainability**: Understand model behavior (Prediction only)
-- **Report Export**: Generate comprehensive reports (Prediction only)
-- **Hypothesis Testing**: Run statistical tests (Hypothesis Testing only)
-""")
-
-# Show session state info (for debugging, can be removed in production)
-if st.sidebar.checkbox("Show Session State Info", value=False):
+# Debug (collapsed)
+if st.sidebar.checkbox("Show Session State", value=False):
     st.sidebar.json({
-        'has_working_table': st.session_state.get('working_table') is not None,
+        'has_data': get_data() is not None,
         'task_mode': st.session_state.get('task_mode'),
-        'n_datasets_loaded': len(st.session_state.get('datasets_registry', {})),
-        'has_config': st.session_state.get('data_config') is not None and st.session_state.get('data_config').target_col is not None,
-        'has_pipeline': st.session_state.get('preprocessing_pipeline') is not None,
-        'has_splits': st.session_state.get('X_train') is not None,
-        'n_trained_models': len(st.session_state.get('trained_models', {}))
+        'n_datasets': len(st.session_state.get('datasets_registry', {})),
+        'configured': st.session_state.get('data_config') is not None,
+        'pipeline': st.session_state.get('preprocessing_pipeline') is not None,
+        'splits': st.session_state.get('X_train') is not None,
+        'n_models': len(st.session_state.get('trained_models', {})),
     })

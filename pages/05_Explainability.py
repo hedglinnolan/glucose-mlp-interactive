@@ -926,6 +926,110 @@ if task_final == 'regression' and len(mr) >= 2:
 else:
     st.info("Bland–Altman is available for **regression** tasks with at least two trained models.")
 
+# ============================================================================
+# EXTERNAL VALIDATION
+# ============================================================================
+st.header("🔗 External Validation")
+st.markdown("""
+**Why this matters:** Internal validation (train/test split) shows how well your model works on similar data.
+External validation — applying the model to a completely separate dataset — is the gold standard for publication.
+""")
+
+with st.expander("Upload External Validation Dataset", expanded=False):
+    ext_file = st.file_uploader("Upload external dataset (CSV/Excel)", type=["csv", "xlsx", "xls"], key="ext_val_file")
+
+    if ext_file is not None:
+        from data_processor import load_tabular_data
+        try:
+            ext_df = load_tabular_data(ext_file, filename=ext_file.name)
+            st.success(f"Loaded external dataset: {ext_df.shape[0]} rows × {ext_df.shape[1]} columns")
+
+            # Check required columns exist
+            required_cols = data_config.feature_cols + [data_config.target_col]
+            missing_cols = [c for c in required_cols if c not in ext_df.columns]
+            if missing_cols:
+                st.error(f"Missing columns in external dataset: {missing_cols}")
+            else:
+                if st.button("Validate on External Dataset", key="run_ext_val"):
+                    from ml.bootstrap import bootstrap_all_regression_metrics, bootstrap_all_classification_metrics, format_metric_with_ci
+
+                    ext_y = ext_df[data_config.target_col].values
+                    ext_X = ext_df[data_config.feature_cols]
+
+                    st.subheader("External Validation Results")
+                    for name in st.session_state.get('trained_models', {}):
+                        model_obj = st.session_state.trained_models[name]
+                        pipeline_local = st.session_state.get("fitted_preprocessing_pipelines", {}).get(name)
+
+                        try:
+                            if pipeline_local is not None:
+                                ext_X_t = pipeline_local.transform(ext_X)
+                            else:
+                                ext_X_t = np.array(ext_X)
+
+                            ext_pred = model_obj.predict(ext_X_t)
+
+                            st.markdown(f"**{name.upper()}:**")
+                            if data_config.task_type == "regression":
+                                cis = bootstrap_all_regression_metrics(ext_y, ext_pred, n_resamples=500)
+                            else:
+                                cis = bootstrap_all_classification_metrics(ext_y, ext_pred, n_resamples=500)
+
+                            for metric_name, result in cis.items():
+                                st.write(f"  {metric_name}: {format_metric_with_ci(result)}")
+                        except Exception as e:
+                            st.warning(f"Could not validate {name}: {e}")
+        except Exception as e:
+            st.error(f"Error loading file: {e}")
+
+# ============================================================================
+# SUBGROUP ANALYSIS
+# ============================================================================
+st.header("📊 Subgroup Analysis")
+st.markdown("""
+**Why this matters:** Reviewers often ask: "Does your model work equally well for all subgroups?"
+Subgroup analysis reveals performance disparities across demographics or clinical categories.
+""")
+
+with st.expander("Run Subgroup Analysis", expanded=False):
+    _df_sub = get_data()
+    if _df_sub is not None and st.session_state.get('trained_models'):
+        from data_processor import get_categorical_columns
+        cat_cols = get_categorical_columns(_df_sub)
+        subgroup_options = [c for c in cat_cols if c != data_config.target_col and _df_sub[c].nunique() <= 10]
+
+        if subgroup_options:
+            subgroup_var = st.selectbox("Stratify by", subgroup_options, key="subgroup_var")
+
+            if st.button("Run Subgroup Analysis", key="run_subgroup"):
+                from ml.publication import subgroup_analysis, plot_forest_subgroups
+
+                for name, results in st.session_state.model_results.items():
+                    y_test_sub = np.array(results["y_test"])
+                    y_pred_sub = np.array(results["y_test_pred"])
+
+                    # Get subgroup labels for test set
+                    X_test_local = st.session_state.get("X_test")
+                    if X_test_local is not None and subgroup_var in X_test_local.columns:
+                        subgroup_labels = X_test_local[subgroup_var].values
+
+                        st.subheader(f"{name.upper()}")
+                        sub_df = subgroup_analysis(
+                            y_test_sub, y_pred_sub, subgroup_labels,
+                            task_type=data_config.task_type or "regression",
+                            n_bootstrap=200,
+                        )
+                        st.dataframe(sub_df[["Subgroup", "N", sub_df.columns[2], "95% CI"]], use_container_width=True, hide_index=True)
+
+                        fig = plot_forest_subgroups(sub_df, metric_name=sub_df.columns[2])
+                        st.plotly_chart(fig, use_container_width=True, key=f"forest_{name}")
+                    else:
+                        st.warning(f"Subgroup variable `{subgroup_var}` not found in test data.")
+        else:
+            st.info("No suitable categorical variables found for subgroup analysis (need ≤10 unique values).")
+    else:
+        st.info("Train models first to run subgroup analysis.")
+
 # State Debug (Advanced)
 with st.expander("Advanced / State Debug", expanded=False):
     st.markdown("**Current State:**")

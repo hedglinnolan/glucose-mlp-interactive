@@ -524,4 +524,87 @@ else:
                     fig = px.box(df, x=target_col, y=feat, title=f"{feat} by {target_col}")
                     st.plotly_chart(fig, width="stretch")
 
-st.success("EDA complete. Proceed to Preprocessing page.")
+# ============================================================================
+# TABLE 1: Characteristics of Study Population
+# ============================================================================
+st.header("📋 Table 1: Study Population Characteristics")
+st.markdown("""
+**Why this matters:** Table 1 is the first table in nearly every clinical/research paper.
+It summarizes your study population, stratified by groups, with appropriate statistical tests.
+""")
+
+with st.expander("Generate Table 1", expanded=False):
+    from ml.table_one import Table1Config, generate_table1, table1_to_csv, table1_to_latex
+    from data_processor import get_categorical_columns
+
+    all_numeric = get_numeric_columns(df)
+    all_categorical = get_categorical_columns(df)
+
+    # Grouping variable
+    possible_groups = [c for c in all_categorical if c != target_col and df[c].nunique() <= 10]
+    grouping_var = st.selectbox(
+        "Stratify by (grouping variable)",
+        options=["None"] + possible_groups,
+        index=0,
+        help="Select a categorical variable to stratify the table. Leave 'None' for overall summary only.",
+        key="table1_group",
+    )
+
+    # Variable selection
+    t1_continuous = st.multiselect(
+        "Continuous variables",
+        options=[c for c in all_numeric if c != target_col],
+        default=[c for c in feature_cols if c in all_numeric][:10],
+        key="table1_continuous",
+    )
+    t1_categorical = st.multiselect(
+        "Categorical variables",
+        options=[c for c in all_categorical if c != target_col and c != grouping_var],
+        default=[c for c in feature_cols if c in all_categorical][:5],
+        key="table1_categorical",
+    )
+
+    # Options
+    col_t1a, col_t1b, col_t1c = st.columns(3)
+    with col_t1a:
+        show_pvalues = st.checkbox("Show p-values", value=True, key="table1_pval")
+    with col_t1b:
+        show_smd = st.checkbox("Show SMD", value=False, key="table1_smd",
+                               help="Standardized Mean Difference (for 2 groups)")
+    with col_t1c:
+        show_missing = st.checkbox("Show missing counts", value=True, key="table1_miss")
+
+    if st.button("Generate Table 1", key="gen_table1", type="primary"):
+        config = Table1Config(
+            grouping_var=grouping_var if grouping_var != "None" else None,
+            continuous_vars=t1_continuous,
+            categorical_vars=t1_categorical,
+            show_pvalues=show_pvalues,
+            show_smd=show_smd,
+            show_missing=show_missing,
+        )
+        table1_df, table1_metadata = generate_table1(df, config)
+        st.session_state["table1_df"] = table1_df
+        st.session_state["table1_metadata"] = table1_metadata
+
+    if st.session_state.get("table1_df") is not None:
+        table1_df = st.session_state["table1_df"]
+        st.dataframe(table1_df, use_container_width=True)
+
+        # Test info
+        table1_metadata = st.session_state.get("table1_metadata", {})
+        if table1_metadata.get("tests_used"):
+            st.caption("**Tests used:** " + ", ".join(
+                f"{var}: {test}" for var, test in table1_metadata["tests_used"].items()
+            ))
+
+        # Export options
+        col_exp1, col_exp2 = st.columns(2)
+        with col_exp1:
+            csv_data = table1_to_csv(table1_df)
+            st.download_button("📥 Download CSV", csv_data, "table1.csv", "text/csv", key="dl_table1_csv")
+        with col_exp2:
+            latex_data = table1_to_latex(table1_df)
+            st.download_button("📥 Download LaTeX", latex_data, "table1.tex", "text/plain", key="dl_table1_latex")
+
+st.success("EDA complete. Proceed to Feature Selection or Preprocessing.")
