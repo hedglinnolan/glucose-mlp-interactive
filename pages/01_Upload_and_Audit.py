@@ -201,114 +201,22 @@ with st.sidebar:
                     st.session_state.pop('confirm_clear_session', None)
                     st.rerun()
         
-        st.divider()
-        
-        if not st.session_state.get('confirm_reset'):
-            if st.button("Delete All Projects & Data", key="reset_all", type="secondary"):
-                st.session_state['confirm_reset'] = True
-        
-        if st.session_state.get('confirm_reset'):
-            st.error("Are you sure? This will delete ALL projects and dataset records.")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Yes, Delete Everything", type="primary", key="confirm_yes"):
-                    db.reset_all_data()
-                    st.session_state.pop('datasets_registry', None)
-                    st.session_state.pop('working_table', None)
-                    st.session_state.pop('merge_steps', None)
-                    st.session_state.pop('transposed_for_merge', None)
-                    st.session_state.pop('confirm_reset', None)
-                    reset_data_dependent_state()
-                    st.success("All data cleared!")
-                    st.rerun()
-            with col2:
-                if st.button("Cancel", key="confirm_no"):
-                    st.session_state.pop('confirm_reset', None)
-                    st.rerun()
+
 
 # ============================================================================
-# SECTION 1: PROJECT MANAGEMENT
+# IMPLICIT PROJECT (auto-created per session, no UI)
 # ============================================================================
-st.header("Step 1: Select or Create Project")
-st.caption("Projects group related datasets that you want to merge and analyze together.")
-
-all_projects = db.get_all_projects()
 active_project = db.get_active_project()
-
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    if all_projects:
-        # Use unique display names (append id when duplicates exist)
-        from collections import Counter
-        name_counts = Counter(p['name'] for p in all_projects)
-        project_options = []
-        for p in all_projects:
-            display_name = f"{p['name']} (id:{p['id']})" if name_counts[p['name']] > 1 else p['name']
-            project_options.append((display_name, p['id']))
-        
-        option_labels = [opt[0] for opt in project_options]
-        option_ids = [opt[1] for opt in project_options]
-        
-        # Determine current selection (safe against missing/stale active project)
-        if active_project and active_project['id'] in option_ids:
-            current_idx = option_ids.index(active_project['id'])
-        else:
-            current_idx = 0
-        
-        selected_project_name = st.selectbox(
-            "Select Existing Project",
-            options=option_labels,
-            index=current_idx,
-            key="project_selection"
-        )
-        selected_project_id = option_ids[option_labels.index(selected_project_name)]
-        
-        if selected_project_id != (active_project['id'] if active_project else None):
-            if st.button("Switch to This Project", key="switch_project"):
-                db.set_active_project(selected_project_id)
-                reset_data_dependent_state()
-                st.session_state.pop('datasets_registry', None)
-                st.session_state.pop('working_table', None)
-                st.rerun()
-    else:
-        st.info("No projects yet. Create your first project below.")
-
-with col2:
-    with st.expander("Create New Project", expanded=not all_projects):
-        new_project_name = st.text_input("Project Name", key="new_project_name")
-        new_project_desc = st.text_area("Description (optional)", key="new_project_desc", height=68)
-        
-        if st.button("Create Project", key="create_project", type="primary"):
-            if new_project_name:
-                existing_names = [p['name'] for p in all_projects] if all_projects else []
-                if new_project_name.strip() in existing_names:
-                    st.error(f"A project named '{new_project_name}' already exists. Choose a different name.")
-                else:
-                    project_id = db.create_project(new_project_name.strip(), new_project_desc)
-                    reset_data_dependent_state()
-                    st.session_state.pop('datasets_registry', None)
-                    st.session_state.pop('working_table', None)
-                    st.success(f"Project '{new_project_name}' created!")
-                    st.rerun()
-            else:
-                st.error("Please enter a project name")
-
-# Get current active project
-active_project = db.get_active_project()
-
 if not active_project:
-    st.warning("Please create or select a project to continue.")
-    st.stop()
-
-st.success(f"**Active Project:** {active_project['name']}")
+    db.create_project("Session", "Auto-created session workspace")
+    active_project = db.get_active_project()
 
 # ============================================================================
 # SECTION 2: UPLOAD FILES TO PROJECT
 # ============================================================================
 st.markdown("---")
-st.header("Step 2: Upload Files to Project")
-st.caption("Upload all related data files. You can merge them in the next step.")
+st.header("Step 1: Upload Your Data")
+st.caption("Upload one or more data files. If you have multiple files, you can merge them in the next step.")
 
 # Initialize datasets registry for this project
 if 'datasets_registry' not in st.session_state:
@@ -546,7 +454,7 @@ if not project_datasets:
 st.markdown("---")
 
 if len(project_datasets) > 1:
-    st.header("Step 3: Combine Your Datasets")
+    st.header("Step 2: Combine Your Datasets")
     
     # Check how many datasets are ready in memory
     datasets_ready = sum(1 for d in project_datasets if d['id'] in st.session_state.datasets_registry)
@@ -1241,7 +1149,7 @@ if len(project_datasets) > 1:
 
 else:
     # Single dataset - use it directly
-    st.header("Step 3: Working Table")
+    st.header("Step 2: Working Table")
     st.caption("With a single dataset, it becomes your working table directly.")
     
     single_dataset = project_datasets[0]
@@ -1281,7 +1189,7 @@ if len(df) == 0 or len(df.columns) == 0:
 # SECTION 4: DATA AUDIT
 # ============================================================================
 st.markdown("---")
-st.header("Step 4: Data Audit")
+st.header("Step 3: Data Audit")
 
 # Quick summary metrics at top
 col1, col2, col3, col4, col5 = st.columns(5)
@@ -1524,7 +1432,7 @@ st.session_state.data_audit = audit_results
 # SECTION 5: TASK MODE & FIELD SELECTION
 # ============================================================================
 st.markdown("---")
-st.header("Step 5: Configure Analysis")
+st.header("Step 4: Configure Analysis")
 
 # Task mode selection
 task_mode_options = {
