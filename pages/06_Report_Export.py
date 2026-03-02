@@ -741,7 +741,8 @@ with st.expander("📄 Auto-Generated Methods Section", expanded=False):
         train_n = len(st.session_state.get('X_train', []))
         val_n = len(st.session_state.get('X_val', []))
         test_n = len(st.session_state.get('X_test', []))
-        prep_config = st.session_state.get('preprocessing_config', {})
+        # Prefer the detailed preprocessing_summary; fall back to raw config
+        prep_config = st.session_state.get('preprocessing_summary') or st.session_state.get('preprocessing_config', {})
 
         # Filter model results to selected models
         selected_results = {k: v for k, v in model_results.items() if k in selected_for_report} if include_results else None

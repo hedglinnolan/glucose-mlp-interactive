@@ -133,23 +133,55 @@ def generate_methods_section(
     if feature_selection_method:
         sections.append(f" Feature selection was performed using {feature_selection_method}.")
 
-    # Missing data
+    # Missing data & Preprocessing (combined when preprocessing_summary available)
+    _preproc = preprocessing_config or {}
+    _has_summary = bool(_preproc.get("missing_data"))
+
     sections.append("\n\n### Missing Data\n")
-    if missing_data_strategy:
+    if _has_summary:
+        _md = _preproc["missing_data"]
+        sections.append(f"Missing numeric values were handled using {_md['label']}.")
+        if _md.get("indicators"):
+            sections.append(
+                " Binary indicator variables were added for features with missing values "
+                "to allow models to leverage missingness patterns."
+            )
+    elif missing_data_strategy:
         sections.append(f"Missing data were handled using {missing_data_strategy}.")
     else:
         sections.append("[PLACEHOLDER: Describe how missing data were handled.]")
 
-    # Preprocessing
     sections.append("\n\n### Data Preprocessing\n")
-    if preprocessing_config:
+    if _has_summary:
+        sentences = []
+        _sc = _preproc.get("scaling", {})
+        if _sc.get("method", "none") != "none":
+            n_num = _preproc.get("n_numeric", 0)
+            num_note = f" ({n_num} features)" if n_num else ""
+            sentences.append(f"Continuous predictors{num_note} were scaled using {_sc['label']}.")
+        _tr = _preproc.get("transforms", {})
+        if _tr.get("method", "none") != "none":
+            sentences.append(f"A {_tr['label']} was applied to reduce skewness.")
+        _ol = _preproc.get("outliers", {})
+        if _ol.get("method", "none") != "none":
+            sentences.append(f"Outliers were addressed via {_ol['label']}.")
+        _en = _preproc.get("encoding", {})
+        if _en.get("method"):
+            n_cat = _preproc.get("n_categorical", 0)
+            cat_note = f" ({n_cat} variables)" if n_cat else ""
+            sentences.append(f"Categorical predictors{cat_note} were transformed using {_en['label']}.")
+        if sentences:
+            sections.append(" ".join(sentences))
+        else:
+            sections.append("No additional preprocessing transformations were applied.")
+    elif _preproc:
         steps = []
-        scaling = preprocessing_config.get("numeric_scaling", "standard")
+        scaling = _preproc.get("numeric_scaling", "standard")
         if scaling != "none":
             steps.append(f"numeric features were {scaling}-scaled")
-        imputation = preprocessing_config.get("numeric_imputation", "median")
+        imputation = _preproc.get("numeric_imputation", "median")
         steps.append(f"missing numeric values were imputed using the {imputation}")
-        cat_enc = preprocessing_config.get("categorical_encoding", "onehot")
+        cat_enc = _preproc.get("categorical_encoding", "onehot")
         if cat_enc:
             steps.append(f"categorical variables were encoded using {cat_enc} encoding")
         if steps:

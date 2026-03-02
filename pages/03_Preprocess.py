@@ -133,18 +133,47 @@ for group_name in sorted(model_groups_prep.keys()):
             border_color = "#667eea" if is_selected else "#e2e8f0"
             bg_color = "#f0f0ff" if is_selected else "#ffffff"
             notes_text = "; ".join(spec.capabilities.notes) if spec.capabilities.notes else ""
+            check_icon = "✅" if is_selected else ""
+            _desc_map = {
+                "ridge": "L2-regularized linear model. Good baseline.",
+                "lasso": "L1-regularized; performs feature selection.",
+                "elasticnet": "Combines L1 + L2 penalties.",
+                "logreg": "Standard linear classifier. Interpretable.",
+                "glm": "Ordinary least squares or logistic regression.",
+                "huber": "Robust to outliers in the target variable.",
+                "knn_reg": "Predicts from nearby neighbors. No assumptions.",
+                "knn_clf": "Classifies by majority vote of neighbors.",
+                "rf": "Ensemble of decorrelated trees. Robust default.",
+                "extratrees_reg": "Extremely randomized trees. Fast.",
+                "extratrees_clf": "Extremely randomized trees. Fast.",
+                "histgb_reg": "Fast gradient boosting with histogram binning.",
+                "histgb_clf": "Fast gradient boosting with histogram binning.",
+                "svr": "Finds optimal margin hyperplane for regression.",
+                "svc": "Finds optimal margin hyperplane for classification.",
+                "gaussian_nb": "Assumes feature independence. Very fast.",
+                "lda": "Maximizes class separability. Linear boundaries.",
+                "nn": "Multi-layer perceptron. Flexible, needs tuning.",
+            }
+            desc = _desc_map.get(model_key, notes_text)
             st.markdown(f"""
-            <div style="border: 2px solid {border_color}; border-radius: 10px; padding: 0.8rem;
-                        background: {bg_color}; margin-bottom: 0.5rem; transition: all 0.15s;">
-                <strong style="font-size: 0.95rem;">{spec.name}</strong>
-                {"<br/><span style='font-size: 0.78rem; color: #64748b;'>" + notes_text + "</span>" if notes_text else ""}
+            <div style="border: 2px solid {border_color}; border-radius: 10px; padding: 0.75rem 1rem;
+                        background: {bg_color}; margin-bottom: 0.5rem; transition: all 0.15s;
+                        box-shadow: {'0 2px 8px rgba(102,126,234,0.15)' if is_selected else 'none'};">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <strong style="font-size: 0.95rem;">{spec.name}</strong>
+                    <span style="font-size: 0.75rem; background: {'#667eea' if is_selected else '#e2e8f0'};
+                           color: {'white' if is_selected else '#64748b'}; padding: 2px 8px;
+                           border-radius: 12px;">{group_name}</span>
+                </div>
+                <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">{desc}</div>
+                {f'<div style="margin-top: 4px; font-size: 0.8rem;">{check_icon}</div>' if is_selected else ''}
             </div>
             """, unsafe_allow_html=True)
             st.checkbox(
                 "Select",
                 value=is_selected,
                 key=ck,
-                label_visibility="collapsed" if is_selected else "visible",
+                label_visibility="collapsed",
             )
 
 selected_models = [k.replace("train_model_", "") for k, v in st.session_state.items() if k.startswith("train_model_") and v]
@@ -721,6 +750,43 @@ if st.button("🔨 Build Pipelines", type="primary", key="preprocess_build_butto
             set_preprocessing_pipelines(pipelines_by_model, configs_by_model, base_config)
             _built = [k for k in pipelines_by_model.keys() if k != "default"]
             st.session_state["preprocess_built_model_keys"] = _built
+
+            # Save preprocessing summary for methods section generation
+            _first_cfg = next(iter(configs_by_model.values()), {})
+            _imp_method = _first_cfg.get("numeric_imputation", "median")
+            _imp_label = {"median": "median imputation", "mean": "mean imputation",
+                          "iterative": "multiple imputation by chained equations (MICE)",
+                          "constant": "constant value imputation"}.get(_imp_method, _imp_method)
+            _scale_method = _first_cfg.get("numeric_scaling", "standard")
+            _scale_label = {"standard": "z-score standardization (zero mean, unit variance)",
+                            "robust": "robust scaling (median and IQR)",
+                            "minmax": "min-max normalization to [0, 1]",
+                            "none": "no scaling applied"}.get(_scale_method, _scale_method)
+            _enc_method = _first_cfg.get("categorical_encoding", "onehot")
+            _enc_label = {"onehot": "one-hot encoding", "target": "target encoding",
+                          "ordinal": "ordinal encoding"}.get(_enc_method, _enc_method)
+            _outlier = _first_cfg.get("numeric_outlier_treatment", "none")
+            _outlier_label = {"none": "no explicit outlier treatment",
+                              "percentile": "percentile-based winsorization",
+                              "mad": "MAD-based outlier clipping"}.get(_outlier, _outlier)
+            _transform = _first_cfg.get("numeric_power_transform", "none")
+            if _first_cfg.get("numeric_log_transform"):
+                _transform = "log1p"
+            _transform_label = {"none": "no additional transformation",
+                                "yeo-johnson": "Yeo-Johnson power transformation",
+                                "log1p": "log(1+x) transformation"}.get(_transform, _transform)
+            st.session_state["preprocessing_summary"] = {
+                "missing_data": {"method": _imp_method, "label": _imp_label,
+                                 "indicators": _first_cfg.get("numeric_missing_indicators", False)},
+                "scaling": {"method": _scale_method, "label": _scale_label},
+                "encoding": {"method": _enc_method, "label": _enc_label},
+                "outliers": {"method": _outlier, "label": _outlier_label,
+                             "params": _first_cfg.get("numeric_outlier_params", {})},
+                "transforms": {"method": _transform, "label": _transform_label},
+                "n_numeric": len(numeric_features),
+                "n_categorical": len(categorical_features),
+                "models_configured": list(configs_by_model.keys()),
+            }
 
             # Model-aware preprocessing insights for Train & Compare and Report
             high_card = bool(profile and getattr(profile, "high_cardinality_features", None))
