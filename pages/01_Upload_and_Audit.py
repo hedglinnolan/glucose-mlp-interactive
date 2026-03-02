@@ -17,9 +17,8 @@ from utils.datasets import get_builtin_datasets
 from utils.reconcile import reconcile_target_features
 from utils.state_reconcile import reconcile_state_with_df
 from utils.storyline import render_progress_indicator, render_breadcrumb, render_page_navigation
-from utils.dataset_db import (
-    get_db, detect_common_columns, suggest_join_keys, execute_merge
-)
+from utils.session_projects import get_project_manager
+from utils.dataset_db import detect_common_columns, suggest_join_keys, execute_merge
 from utils.column_utils import make_unique_columns
 from data_processor import (
     load_tabular_data, get_numeric_columns, get_selectable_columns,
@@ -99,8 +98,8 @@ def render_schema_diagram(dataframes: Dict[str, pd.DataFrame], common_cols: Dict
 # Initialize session state
 init_session_state()
 
-# Initialize database
-db = get_db()
+# Initialize session-only project manager (no shared disk state)
+db = get_project_manager()
 
 st.set_page_config(
     page_title="Upload & Audit",
@@ -129,21 +128,14 @@ with st.sidebar:
     
     with st.expander("About Your Data", expanded=False):
         st.markdown("""
-        **What gets saved:**
-        - Project names and settings
-        - Dataset metadata (names, columns, types)
-        - Merge configurations
-        
-        **What doesn't get saved:**
-        - The actual data files (you'll need to re-upload after refresh)
-        - Analysis results and trained models
+        **Your data stays private.** Everything lives in your browser session only — 
+        nothing is saved to disk and no other user can see your projects or data.
         
         **When you refresh or close the app:**
-        - Your projects remain saved
-        - You'll need to re-upload your data files
-        - Any unsaved analysis work is lost
+        - All projects, data, and results are cleared
+        - You'll need to re-upload your files
         
-        **Tip:** Complete your analysis in one session, or use the Report Export to save your results.
+        **Tip:** Complete your analysis in one session, and use **Report Export** to save your results.
         """)
     
     # Quick actions
@@ -328,50 +320,18 @@ project_datasets = db.get_project_datasets(active_project['id'])
 if project_datasets:
     st.subheader("Datasets in This Project")
     
-    # Check which datasets are in memory vs only in DB (orphaned after refresh)
-    datasets_in_memory = []
-    datasets_need_reupload = []
-    
-    for d in project_datasets:
-        in_memory = d['id'] in st.session_state.datasets_registry
-        d['in_memory'] = in_memory
-        if in_memory:
-            datasets_in_memory.append(d)
-        else:
-            datasets_need_reupload.append(d)
-    
-    # Show datasets status
     dataset_summary = []
     for d in project_datasets:
-        status = "Ready" if d['in_memory'] else "Needs Re-upload"
+        in_memory = d['id'] in st.session_state.datasets_registry
         dataset_summary.append({
             'Name': d['name'],
             'Filename': d['filename'],
             'Rows': f"{d['shape_rows']:,}",
             'Columns': d['shape_cols'],
-            'Status': status
+            'Status': "Ready" if in_memory else "Missing"
         })
     
     st.dataframe(pd.DataFrame(dataset_summary), width="stretch", hide_index=True)
-    
-    # Warning if some datasets need re-upload
-    if datasets_need_reupload:
-        st.warning(f"""
-        **{len(datasets_need_reupload)} dataset(s) need to be re-uploaded.**
-        
-        This happens when you refresh the page or return to a previous session. 
-        The project structure is saved, but you need to upload the actual data files again.
-        
-        **Options:**
-        1. Re-upload the same files below (they'll match to existing records)
-        2. Clear the old records and start fresh
-        """)
-        
-        if st.button("Clear old dataset records", key="clear_orphaned"):
-            for d in datasets_need_reupload:
-                db.delete_dataset(d['id'])
-            st.success("Cleared old records. You can now upload fresh files.")
-            st.rerun()
     
     # Dataset actions
     with st.expander("Manage Datasets"):
